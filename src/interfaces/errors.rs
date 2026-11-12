@@ -300,3 +300,127 @@ impl IntoResponse for AppError {
         (status, body).into_response()
     }
 }
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Byte-length oracle for the [`ErrorResponse`] wire shape, as produced by
+    /// `AppError::into_response`:
+    ///
+    /// ```text
+    /// {"status":"400 Bad Request","error":"<m>","message":"<m>","error_type":"<t>"}
+    /// ```
+    ///
+    /// which is `68 + 2·|m| + |t|` bytes: the message is serialised twice
+    /// (`error` and `message` are the same string) plus the quotes around each
+    /// of the three values (6), and 62 bytes of fixed keys, punctuation and the
+    /// `"400 Bad Request"` literal. The serialized form must be exactly the
+    /// compact one — field order `status, error, message, error_type`, no
+    /// whitespace between tokens — because the audit measures response bodies
+    /// by length.
+    #[test]
+    fn error_response_length_oracle() {
+        // Fixed keys + punctuation + the `"400 Bad Request"` literal, plus the
+        // six quotes wrapping the three values' payloads.
+        const FIXED: usize = 68;
+
+        // Real (message, error_type) pairs from the tree: the error types are
+        // `AppError`'s constructors ("BadRequest", "Unauthorized", "NotFound")
+        // and `ErrorKind::wire_name()` ("InvalidInput").
+        let pairs: &[(&str, &str)] = &[
+            (
+                "Password must be at least 8 characters long",
+                "InvalidInput",
+            ),
+            ("Invalid UUID", "BadRequest"),
+            ("Mount name must not be empty", "BadRequest"),
+            ("Session not found", "Unauthorized"),
+            ("Invalid password", "Unauthorized"),
+            ("Plugin not found", "NotFound"),
+        ];
+
+        for &(message, error_type) in pairs {
+            let serialized = serde_json::to_string(&ErrorResponse {
+                status: "400 Bad Request",
+                error: message,
+                message,
+                error_type,
+            })
+            .expect("ErrorResponse is serialisable");
+
+            assert_eq!(
+                serialized.len(),
+                FIXED + 2 * message.len() + error_type.len(),
+                "length oracle for ({message:?}, {error_type:?}): {serialized}"
+            );
+
+            assert_eq!(
+                serialized,
+                format!(
+                    r#"{{"status":"400 Bad Request","error":"{message}","message":"{message}","error_type":"{error_type}"}}"#
+                ),
+                "field order status,error,message,error_type and compact encoding"
+            );
+
+            // Nothing is inserted between tokens. (The `"400 Bad Request"`
+            // value legitimately contains spaces, so check the separator forms
+            // compact serde_json never emits instead of the ' ' byte.)
+            assert!(
+                !serialized.contains("\": ")
+                    && !serialized.contains("\", ")
+                    && !serialized.contains('\n'),
+                "compact encoding inserts no whitespace: {serialized}"
+            );
+        }
+
+        // Byte length is the incident-triage tool: a captured 4xx body's length
+        // identifies the build that produced it without a payload diff.
+        let body_len = |message: &str, error_type: &str| {
+            serde_json::to_string(&ErrorResponse {
+                status: "400 Bad Request",
+                error: message,
+                message,
+                error_type,
+            })
+            .unwrap()
+            .len()
+        };
+
+        // Parity corollary: `68 + 2·|m|` is even, so the total length has the
+        // parity of `error_type`. With `InvalidInput` (12 bytes) every body is
+        // even.
+        for message in ["Invalid UUID", "Session not found", "a"] {
+            let len = body_len(message, "InvalidInput");
+            assert_eq!(len, FIXED + 2 * message.len() + "InvalidInput".len());
+            assert_eq!(len % 2, 0, "even for {message:?}");
+        }
+
+        // Concrete instance: the registration gate's password-length message
+        // (`auth_application_service.rs`: `format!("Password must be at least
+        // {min} characters long")`, min = 8 → 43 bytes).
+        let password = "Password must be at least 8 characters long";
+        assert_eq!(password.len(), 43);
+        assert_eq!(body_len(password, "InvalidInput"), 166, "68 + 2·43 + 12");
+        assert_eq!(body_len(password, "Invalid Input"), 167, "68 + 2·43 + 13");
+
+        // The same request, measured on both sides of the wire-form change.
+        // The deployed v0.10.0 release served this 219-byte body for a
+        // `POST /api/setup` whose `email` field carried no `@`; the identical
+        // request is 218 bytes at HEAD because the discriminator changed from
+        // that build's `ErrorKind::as_str()` ("Invalid Input",
+        // `v0.10.0:src/domain/errors.rs`) to `ErrorKind::wire_name()`
+        // ("InvalidInput", HEAD). One byte identifies the serving build.
+        let setup = "Error creating admin user: Validation error: Invalid email: missing @";
+        assert_eq!(setup.len(), 69);
+        assert_eq!(body_len(setup, "Invalid Input"), 219, "v0.10.0 as_str()");
+        assert_eq!(body_len(setup, "InvalidInput"), 218, "HEAD wire_name()");
+        assert_eq!(
+            body_len(setup, "Invalid Input") - body_len(setup, "InvalidInput"),
+            1,
+            "the whole drift is the single space in as_str()'s spelling"
+        );
+    }
+}
