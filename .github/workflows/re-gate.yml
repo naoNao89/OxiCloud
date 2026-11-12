@@ -786,7 +786,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$ART"
-          cargo test --lib -- setup_openapi_contract 2>&1 | tee "$ART/openapi-artifact-test.log"
+          cargo test --lib -- setup_openapi_contract 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee "$ART/openapi-artifact-test.log"
           # Non-vacuous: the two tests must have been RUN and passed, not filtered out.
           for t in committed_spec_declares_the_setup_contract setup_admin_attribute_declares_the_contract; do
             grep -q "^test .*$t \.\.\. ok$" "$ART/openapi-artifact-test.log" \
@@ -811,10 +811,24 @@ jobs:
       - name: Scoped vitest run — the SDK error-shape throw oracle
         if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
         working-directory: frontend
+        env:
+          # The runner gives each step a TTY, so vitest keeps its colour even
+          # through `| tee` — unlike the sandbox, where the capture was a plain
+          # redirect and the summary line was bare text. The assertions below
+          # grep that summary literally, so the artifact is forced plain here:
+          # no colour, and any escape that survives is stripped on the way in.
+          # (First real run failed on this: "Test Files  1 passed (1)" was
+          # present but wrapped in \x1b[2m / \x1b[1m\x1b[32m, so `grep -q
+          # 'Test Files *1 passed'` matched nothing and the leg was reported as
+          # "did not run as one passing file" while all 27 tests had passed.)
+          NO_COLOR: "1"
+          FORCE_COLOR: "0"
         run: |
           set -euo pipefail
           mkdir -p "$ART"
-          npx vitest run --reporter=verbose src/lib/api/endpoints/auth.test.ts 2>&1 | tee "$ART/frontend-vitest.txt"
+          npx vitest run --reporter=verbose src/lib/api/endpoints/auth.test.ts 2>&1 \
+            | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+            | tee "$ART/frontend-vitest.txt"
 
       - name: Assert the three shape tests ran green (not vacuous)
         if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
@@ -837,7 +851,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$ART"
-          cargo test --lib -- error_response 2>&1 | tee "$ART/error-byte-oracle.log"
+          cargo test --lib -- error_response 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee "$ART/error-byte-oracle.log"
           grep -q "^test .*error_response_length_oracle \.\.\. ok$" "$ART/error-byte-oracle.log" \
             || { echo "::error::error_response_length_oracle did not run green"; exit 1; }
           grep -q '^test result: ok\.' "$ART/error-byte-oracle.log"
