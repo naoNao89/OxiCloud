@@ -82,7 +82,7 @@ JSON=application/json
 # shut down, reset the DB, boot again — deterministic budget + state per case
 re_fresh() {
   re_shutdown "$LABEL" >/dev/null 2>&1
-  re_db_reset "$RE_DB"
+  re_db_reset "$RE_DB" || { echo "[corpus] db reset failed for $RE_DB — read the container log; this is NOT a boot failure" >&2; exit 1; }
   re_boot "$LABEL" "$RE_PORT" "$RE_DB" || { echo "[corpus] boot failed for $LABEL" >&2; exit 1; }
   RE_CFG_JSON=$(re_cfg_json)
 }

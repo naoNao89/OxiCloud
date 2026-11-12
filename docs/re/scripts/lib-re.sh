@@ -214,8 +214,12 @@ re_db_clone() { # <db> — clone the migrated template
 
 # Fresh, migrated, pristine DB — use where a case needs pristine state.
 re_db_reset() { # <db>
-  re_db_drop "$1"
-  re_db_clone "$1"
+  # Both steps matter and both must be able to fail the caller. A DROP that fails
+  # leaves the clone with a live target; a CLONE that fails used to be swallowed
+  # entirely by callers without `set -e`, surfacing later as a bare "boot failed"
+  # that named the wrong cause.
+  re_db_drop "$1" || return 1
+  re_db_clone "$1" || return 1
 }
 
 re_template_ensure() {
@@ -225,7 +229,15 @@ re_template_ensure() {
   echo "[lib-re] creating migration template DB $RE_TPL_DB (app migrations only)" >&2
   docker exec -i "$RE_PG_CONTAINER" psql -U "$RE_PG_USER" -d postgres -tAX -c \
     "CREATE DATABASE \"$RE_TPL_DB\"" >/dev/null
-  re_boot tpl 18099 "$RE_TPL_DB" || { echo "[lib-re] template boot failed" >&2; return 1; }
+  # The template instance is NOT the caller's own: re_boot assigns the globals
+  # RE_LABEL/RE_PORT/RE_DB, so booting it in-process silently rewrites the
+  # caller's port and database name. Where the template already exists the guard
+  # above returns early and the leak is invisible; on a fresh container -- CI's
+  # service container, which has no volume -- the caller then resets "re_tpl"
+  # against itself ("CREATE DATABASE re_tpl TEMPLATE re_tpl" -> template does not
+  # exist) and the first case dies as a boot failure. Run it in a subshell so the
+  # caller keeps its own RE_DB/RE_PORT.
+  ( re_boot tpl 18099 "$RE_TPL_DB" ) || { echo "[lib-re] template boot failed" >&2; return 1; }
   re_shutdown tpl
   local n
   n=$(re_psql "$RE_TPL_DB" "SELECT count(*) FROM _sqlx_migrations WHERE success")

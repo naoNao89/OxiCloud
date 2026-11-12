@@ -75,7 +75,10 @@ CHURN_STEP = ('pg_log_line_count', 'app_log_window_lines')
 # Explanations for differences that are fully accounted for by the provenance
 # table (differential-results.md §1) plus a named code path. Each entry is
 # (case_id_prefix, build_label, field, explanation). A difference with no entry
-# here is reported as `unexplained` and blocks the gate.
+# here is reported as `unexplained`. That is a report class, not a gate: `--check`
+# compares the per-patch claims and the document bytes, and every `unexplained`
+# verdict in the committed artifact is enumerated with its case prose in
+# docs/re/runtime-evidence.md §C.6.
 ERROR_TYPE_DRIFT = (
     'v0.10.0 renders ErrorKind via as_str() ("Invalid Input", 13 B); HEAD renders '
     'it via wire_name() ("InvalidInput", 12 B). One byte, every DomainError 4xx '
