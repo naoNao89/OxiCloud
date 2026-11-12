@@ -105,6 +105,8 @@ DPoP cryptographically binds a session cookie to a browser-held ECDSA keypair (P
 | `OXICLOUD_RATE_LIMIT_LOGIN_WINDOW_SECS` | `60` | Login rate-limit window (seconds) |
 | `OXICLOUD_RATE_LIMIT_REGISTER_MAX` | `5` | Max registration attempts per IP per window |
 | `OXICLOUD_RATE_LIMIT_REGISTER_WINDOW_SECS` | `3600` | Registration rate-limit window (seconds) |
+| `OXICLOUD_RATE_LIMIT_SETUP_MAX` | `5` | Max `/api/setup` (first-run wizard) requests per IP per window. Separate budget from registration, so neither endpoint can spend the other's |
+| `OXICLOUD_RATE_LIMIT_SETUP_WINDOW_SECS` | `3600` | Setup rate-limit window (seconds) |
 | `OXICLOUD_RATE_LIMIT_REFRESH_MAX` | `20` | Max token refresh attempts per IP per window |
 | `OXICLOUD_RATE_LIMIT_REFRESH_WINDOW_SECS` | `60` | Refresh rate-limit window (seconds) |
 | `OXICLOUD_RATE_LIMIT_USER_PROFILE_MAX` | `60` | Max user-profile lookups per **caller** per window |
@@ -114,9 +116,10 @@ DPoP cryptographically binds a session cookie to a browser-held ECDSA keypair (P
 | `OXICLOUD_LOCKOUT_MAX_FAILURES` | `5` | Consecutive failed logins before account lockout |
 | `OXICLOUD_LOCKOUT_DURATION_SECS` | `900` | Account lockout duration (15 minutes) |
 
-Login, register and refresh are keyed on the **client IP** and guard the
-unauthenticated front door. User-profile and delta-upload are keyed on
-the **caller id** and guard an authenticated user against exhausting a
+Login, register, refresh and setup are keyed on the **client IP** and guard the
+unauthenticated front door (setup, the one-time first-run wizard, has its own
+budget so register traffic cannot consume it). User-profile and delta-upload are
+keyed on the **caller id** and guard an authenticated user against exhausting a
 shared resource.
 
 That distinction decides which knob to reach for. When several actors

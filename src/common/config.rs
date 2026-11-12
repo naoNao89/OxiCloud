@@ -1713,6 +1713,18 @@ pub struct RateLimitConfig {
     pub register_max_requests: u32,
     /// Registration rate-limit window in seconds (default: 3600)
     pub register_window_secs: u64,
+    /// Max `/api/setup` requests per IP per window (default: 5).
+    ///
+    /// `/api/setup` is not "another registration endpoint": it is the one-time
+    /// first-run wizard, reachable exactly once in an instance's life, and it is
+    /// blocked forever afterwards. Sharing the register budget meant a burst of
+    /// registrations could lock the operator out of setup (and a mistyped setup
+    /// attempt could spend the registration budget), so setup gets its own
+    /// instance built from these values. Same defaults as register — an operator
+    /// who sets nothing sees the same numbers — but they now move independently.
+    pub setup_max_requests: u32,
+    /// Setup rate-limit window in seconds (default: 3600)
+    pub setup_window_secs: u64,
     /// Max token refresh attempts per IP per window (default: 20)
     pub refresh_max_requests: u32,
     /// Refresh rate-limit window in seconds (default: 60)
@@ -1757,6 +1769,11 @@ impl Default for RateLimitConfig {
             login_window_secs: 60,
             register_max_requests: 5,
             register_window_secs: 3600,
+            // Same numbers as register, deliberately: the split is about who
+            // owns the budget, not about changing how much setup traffic is
+            // allowed on an untouched deployment.
+            setup_max_requests: 5,
+            setup_window_secs: 3600,
             refresh_max_requests: 20,
             refresh_window_secs: 60,
             lockout_max_failures: 5,
@@ -4064,6 +4081,16 @@ impl AppConfig {
             && let Ok(val) = v
         {
             config.auth.rate_limit.register_window_secs = val;
+        }
+        if let Ok(v) = env::var("OXICLOUD_RATE_LIMIT_SETUP_MAX").map(|v| v.parse::<u32>())
+            && let Ok(val) = v
+        {
+            config.auth.rate_limit.setup_max_requests = val;
+        }
+        if let Ok(v) = env::var("OXICLOUD_RATE_LIMIT_SETUP_WINDOW_SECS").map(|v| v.parse::<u64>())
+            && let Ok(val) = v
+        {
+            config.auth.rate_limit.setup_window_secs = val;
         }
         if let Ok(v) = env::var("OXICLOUD_RATE_LIMIT_REFRESH_MAX").map(|v| v.parse::<u32>())
             && let Ok(val) = v
@@ -6526,6 +6553,90 @@ mod db_connection_string_env_fallback_tests {
         let default_cs = AppConfig::default().database.connection_string;
         let cfg = AppConfig::from_env();
         assert_eq!(cfg.database.connection_string, default_cs);
+        wipe();
+    }
+}
+
+#[cfg(test)]
+mod setup_rate_limit_budget_tests {
+    //! `/api/setup` has its own rate-limit budget, with its own env vars.
+    //!
+    //! Same shape as the sibling `db_connection_string_env_fallback_tests`:
+    //! module-local `ENV_GUARD` around the mutation, keys wiped afterwards.
+    //! `AppConfig::from_env()` is the subject because that is where
+    //! `OXICLOUD_RATE_LIMIT_*` is read — asserting on `RateLimitConfig::default()`
+    //! alone would pass with the parsing broken.
+    //!
+    //! Not gated on `integration_tests` (the sibling is, for its `DATABASE_URL`
+    //! race): nothing here touches `DATABASE_URL`, and only this module reads the
+    //! `OXICLOUD_RATE_LIMIT_SETUP_*` keys.
+    use super::{AppConfig, RateLimitConfig};
+    use std::env;
+    use std::sync::Mutex;
+
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    const MAX_KEY: &str = "OXICLOUD_RATE_LIMIT_SETUP_MAX";
+    const WINDOW_KEY: &str = "OXICLOUD_RATE_LIMIT_SETUP_WINDOW_SECS";
+
+    fn wipe() {
+        // SAFETY: `ENV_GUARD` serialises the mutation inside this module, and no
+        // other test in the build reads or writes these two keys.
+        unsafe {
+            env::remove_var(MAX_KEY);
+            env::remove_var(WINDOW_KEY);
+        }
+    }
+
+    fn set(k: &str, v: &str) {
+        unsafe { env::set_var(k, v) };
+    }
+
+    /// Defaults: 5 attempts per hour, the same numbers the register budget had
+    /// while the two shared one instance.
+    #[test]
+    fn default_is_five_per_hour() {
+        assert_eq!(RateLimitConfig::default().setup_max_requests, 5);
+        assert_eq!(RateLimitConfig::default().setup_window_secs, 3600);
+    }
+
+    /// The two budgets are separate fields, not one value read twice: setting
+    /// the setup vars moves only the setup limiter's inputs, and the register
+    /// pair keeps its own defaults. That independence is the whole point of the
+    /// split (a registration burst can no longer lock the first-run wizard out,
+    /// and vice versa), so it is what the test pins.
+    #[test]
+    fn setup_env_vars_do_not_move_the_register_budget() {
+        let _g = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+
+        wipe();
+        let rl = AppConfig::from_env().auth.rate_limit;
+        assert_eq!(
+            (rl.setup_max_requests, rl.setup_window_secs),
+            (5, 3600),
+            "unset OXICLOUD_RATE_LIMIT_SETUP_* must keep the 5/3600 default"
+        );
+
+        wipe();
+        set(MAX_KEY, "2");
+        set(WINDOW_KEY, "120");
+        let rl = AppConfig::from_env().auth.rate_limit;
+        assert_eq!(
+            (rl.setup_max_requests, rl.setup_window_secs),
+            (2, 120),
+            "OXICLOUD_RATE_LIMIT_SETUP_MAX / _WINDOW_SECS must be honoured"
+        );
+        assert_eq!(
+            (rl.register_max_requests, rl.register_window_secs),
+            (5, 3600),
+            "the register budget must not follow the setup vars"
+        );
+        assert_eq!(
+            (rl.login_max_requests, rl.login_window_secs),
+            (10, 60),
+            "nor must login"
+        );
+
         wipe();
     }
 }
