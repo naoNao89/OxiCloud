@@ -271,6 +271,14 @@ jobs:
           fi
           echo "HARNESS_MODE=$HARNESS_MODE" >> "$GITHUB_ENV"
           echo "HARNESS_SHA=$HARNESS_SHA" >> "$GITHUB_ENV"
+          # provenance.txt was written before the harness resolved, so record the
+          # resolved revision in the artifact as well: the pin's whole point is
+          # that "which harness ran this" is answerable from the evidence, and
+          # without this line it is answerable only from the step log.
+          {
+            echo "harness sha       $HARNESS_SHA"
+            echo "harness mode      $HARNESS_MODE"
+          } >> "$ART/provenance.txt"
           test -f docs/re/scripts/lib-re.sh
           test -f docs/re/evidence/A.jsonl
           test -f docs/re/evidence/differential.json
@@ -750,6 +758,14 @@ jobs:
           fi
           echo "HARNESS_MODE=$HARNESS_MODE" >> "$GITHUB_ENV"
           echo "HARNESS_SHA=$HARNESS_SHA" >> "$GITHUB_ENV"
+          # provenance.txt was written before the harness resolved, so record the
+          # resolved revision in the artifact as well: the pin's whole point is
+          # that "which harness ran this" is answerable from the evidence, and
+          # without this line it is answerable only from the step log.
+          {
+            echo "harness sha       $HARNESS_SHA"
+            echo "harness mode      $HARNESS_MODE"
+          } >> "$ART/provenance.txt"
           test -f docs/re/scripts/lib-re.sh
           test -f docs/re/evidence/A.jsonl
           test -f docs/re/evidence/differential.json
