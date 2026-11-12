@@ -1,0 +1,212 @@
+# 0004-openapi-setup-errors.patch — publish the real `POST /api/setup` contract.
+#
+# Files: src/interfaces/api/handlers/auth_handler.rs
+# Applies to: a clean tree at HEAD (389e161b). Standalone: disjoint from
+#             0001/0002/0003.
+# Policy flag: none. One build action is recorded here for the user:
+#   the generated spec (`resources/gen/openapi.json`) is NOT carried by this
+#   patch (it is a build artifact; regenerating it needs a build). It has since
+#   been regenerated in the delivered tree by the build side, so
+#   `committed_spec_declares_the_setup_contract` is GREEN there
+#   (docs/re/test-runs.txt, `c1-post-regen`); applying only the patches to a clean
+#   HEAD leaves that one test RED until the same command is run.
+#
+# WHAT IT CHANGES
+#   `setup_admin`'s `#[utoipa::path]` declared 201/403/503 only. (Measured, not
+#   assumed: HEAD's committed spec does carry `ApiErrorBody` on 403 and 503 —
+#   what is missing is 400 and 429 entirely.) It now declares:
+#     * 400 — validation from `setup_create_admin`: username length
+#       (3..=254), password shorter than `min_password_length`, or an email
+#       `User::new` refuses; all `ErrorKind::InvalidInput` → `ApiErrorBody`.
+#       A body that is not even JSON is rejected earlier by the `Json`
+#       extractor with a 400 whose body is plain text, not `ApiErrorBody` —
+#       said so in the description rather than papering over it.
+#     * 403 — already initialised (unchanged: already declared with the body).
+#     * 429 — NEW: the rate-limit middleware in front of the route (main.rs),
+#       not the handler; `Retry-After` carries the wait. This is the status
+#       every client hit but no client could see in the contract.
+#     * 503 — no auth service wired (unchanged: already declared with the body).
+#   The handler's doc comment was rewritten to match, status by status, and to
+#   carry the regeneration command for the build owner.
+#
+# NOT DECLARED, DELIBERATELY
+#   * 409 `AlreadyExists`. `setup_create_admin` has two duplicate-user branches
+#     (`username`/`email` already registered) that map to 409, but the endpoint
+#     only runs before the first admin exists and holds the initialisation claim
+#     while it creates the user, so those branches need a pre-seeded database to
+#     reach. Declaring them is a candidate follow-up, not part of this fix.
+#   * `ApiErrorBody.status`'s schema example says `"403"` while the wire value is
+#     `"403 Forbidden"`; pre-existing, out of scope, and it affects every
+#     endpoint that references the schema — a separate sweep.
+#
+# TESTS THAT PIN IT (auth_handler.rs #[cfg(test)] mod
+# setup_openapi_contract_tests)
+#   There was no test in this repo that read `resources/gen/openapi.json`; the
+#   existing spec assertions (`interfaces::api::tests`) build the document in
+#   memory from `ApiDoc::openapi()` and therefore cannot see a stale artifact.
+#   Both layers are pinned here, which is why the tests sit next to the
+#   declaration:
+#   * setup_admin_attribute_declares_the_contract — reads `ApiDoc::openapi()`.
+#     GREEN as soon as the attribute is edited; proves the declaration projects
+#     the five statuses and the `ApiErrorBody` / `PublicUserDto` refs.
+#   * committed_spec_declares_the_setup_contract — reads the CHECKED-IN
+#     `resources/gen/openapi.json`. Was RED while the artifact still declared
+#     201/403/503 only (400 and 429 absent); GREEN in the delivered tree, where
+#     the build side has regenerated it (docs/re/test-runs.txt, `c1-post-regen`).
+#     From here on it guards the artifact: a future regeneration that drops the
+#     400/429 blocks, or an attribute edit nobody regenerated, fails CI instead
+#     of silently regressing every generated client. The comment update that
+#     carries this wording is `cfg(test)` text only — no source line, binary or
+#     code digest changes, so no arm needs re-running for it.
+#
+# REGENERATION (build owner, needs a build — not run by the patch author)
+#   just gen-openapi
+#     = cargo run --features dev_tools --bin generate-openapi
+#       cd frontend && npm run gen:openapi
+#   Then commit `resources/gen/openapi.json` (and the regenerated SDK under
+#   `frontend/src/lib/api/generated/openapi/`) in the same commit. CI's
+#   `openapi-spec-drift` job regenerates the spec and fails on any diff, so a
+#   commit that edits this attribute without the regenerated file goes red —
+#   which is the point of the artifact test above.diff --git a/src/interfaces/api/handlers/auth_handler.rs b/src/interfaces/api/handlers/auth_handler.rs
+index 0adb43e3..8abaf6f2 100644
+--- a/src/interfaces/api/handlers/auth_handler.rs
++++ b/src/interfaces/api/handlers/auth_handler.rs
+@@ -1308,13 +1308,33 @@ pub struct BackchannelLogoutForm {
+ /// Available only when the system is not yet initialized (no admin exists).
+ /// Once the admin is created the endpoint permanently returns 403.
+ /// Uses an atomic "claim" operation so concurrent requests cannot both succeed.
++///
++/// Statuses, and where each one comes from:
++/// * 201 — the admin was created; body is the new `PublicUserDto`.
++/// * 400 — `setup_create_admin` rejected the input: username outside 3..=254
++///   characters, password shorter than `min_password_length`, or an email
++///   `User::new` refuses (all `ErrorKind::InvalidInput` → `ApiErrorBody`).
++///   A body that is not even JSON is rejected earlier by the `Json` extractor
++///   with a 400 whose body is plain text, not `ApiErrorBody`.
++/// * 403 — the system is already initialized (the pre-check, or losing the
++///   atomic claim).
++/// * 429 — the rate-limit middleware in front of this route (`main.rs`), not
++///   this handler; `Retry-After` carries the wait in seconds.
++/// * 503 — no auth service / no admin-settings service is wired.
++///
++/// The spec this feeds (`resources/gen/openapi.json`) is a checked-in build
++/// artifact: after editing this attribute, regenerate it with `just gen-openapi`
++/// — `cargo run --features dev_tools --bin generate-openapi`, then
++/// `cd frontend && npm run gen:openapi` for the SDK.
+ #[utoipa::path(
+     post,
+     path = "/api/setup",
+     request_body = SetupAdminDto,
+     responses(
+         (status = 201, description = "First admin created and system initialized", body = PublicUserDto),
++        (status = 400, description = "Validation rejected the body: username length, password length, or email format (ApiErrorBody)", body = crate::interfaces::errors::ApiErrorBody),
+         (status = 403, description = "System already initialized", body = crate::interfaces::errors::ApiErrorBody),
++        (status = 429, description = "Rate limited by the setup route's rate-limit middleware (not this handler) — the Retry-After header carries the wait (ApiErrorBody)", body = crate::interfaces::errors::ApiErrorBody),
+         (status = 503, description = "Auth service not configured", body = crate::interfaces::errors::ApiErrorBody),
+     ),
+     tag = "auth"
+@@ -2064,3 +2084,104 @@ mod registration_domain_gate_tests {
+         assert_eq!(err.error_type, "RegistrationDomainNotAllowed");
+     }
+ }
++
++#[cfg(test)]
++mod setup_openapi_contract_tests {
++    //! The published contract of `POST /api/setup`, in two layers.
++    //!
++    //! * Source: the `#[utoipa::path]` on `setup_admin` (asserted through
++    //!   `ApiDoc::openapi()`), which is what the generator projects.
++    //! * Artifact: `resources/gen/openapi.json`, which is **checked in** — CI's
++    //!   `openapi-spec-drift` job regenerates it and fails on any diff, so this
++    //!   file, not the attribute, is what third-party clients and the generated
++    //!   TypeScript SDK actually consume.
++    //!
++    //! Why the artifact layer is here and not in `interfaces::api`'s spec tests:
++    //! those assert against `ApiDoc::openapi()` in memory and therefore cannot
++    //! see a stale file — a declaration change nobody regenerated would pass
++    //! them and still ship an outdated contract. No test in this repo read
++    //! `resources/gen/*.json` before, so this module is next to the declaration
++    //! it guards and reads the file by `CARGO_MANIFEST_DIR`.
++    use utoipa::OpenApi;
++
++    fn committed_spec() -> serde_json::Value {
++        let path =
++            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/gen/openapi.json");
++        let raw = std::fs::read_to_string(&path)
++            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
++        serde_json::from_str(&raw)
++            .unwrap_or_else(|e| panic!("parse {} as JSON: {e}", path.display()))
++    }
++
++    /// The shared shape of both layers: 201/400/403/429/503 declared, every
++    /// error status carrying `ApiErrorBody`, and the 429 naming `Retry-After`.
++    fn assert_setup_contract(spec: &serde_json::Value, source: &str) {
++        let responses = spec["paths"]["/api/setup"]["post"]["responses"]
++            .as_object()
++            .unwrap_or_else(|| panic!("{source} has no POST /api/setup responses"));
++
++        let declared: Vec<&str> = responses.keys().map(String::as_str).collect();
++        for status in ["201", "400", "403", "429", "503"] {
++            assert!(
++                responses.contains_key(status),
++                "{source}: POST /api/setup must declare {status}; it declares {declared:?}"
++            );
++        }
++
++        for status in ["400", "403", "429", "503"] {
++            assert_eq!(
++                responses[status]["content"]["application/json"]["schema"]["$ref"],
++                "#/components/schemas/ApiErrorBody",
++                "{source}: the {status} body must be published as ApiErrorBody"
++            );
++        }
++        assert_eq!(
++            responses["201"]["content"]["application/json"]["schema"]["$ref"],
++            "#/components/schemas/PublicUserDto",
++            "{source}: the success body must stay PublicUserDto"
++        );
++
++        let description = responses["429"]["description"].as_str().unwrap_or_default();
++        assert!(
++            description.contains("Retry-After"),
++            "{source}: the 429 must say where the wait is carried; got {description:?}"
++        );
++
++        for name in ["ApiErrorBody", "PublicUserDto"] {
++            assert!(
++                spec["components"]["schemas"].get(name).is_some(),
++                "{source}: components.schemas.{name} is referenced but not published"
++            );
++        }
++    }
++
++    /// The attribute itself. GREEN as soon as the `#[utoipa::path]` above is
++    /// edited: it proves the declaration is well-formed and projects the refs
++    /// the artifact test then looks for.
++    #[test]
++    fn setup_admin_attribute_declares_the_contract() {
++        let spec = serde_json::to_value(crate::interfaces::api::ApiDoc::openapi())
++            .expect("ApiDoc serialises");
++        assert_setup_contract(&spec, "ApiDoc::openapi()");
++    }
++
++    /// The checked-in artifact, read from `resources/gen/openapi.json`.
++    ///
++    /// Before the spec was regenerated this test was RED: HEAD's file declared
++    /// only 201/403/503 for `/api/setup` (403 and 503 did carry the
++    /// `ApiErrorBody` ref; 400 and 429 were absent entirely). In this tree the
++    /// artifact HAS been regenerated (`just gen-openapi`, done by the build side),
++    /// so the test is GREEN; from here on it fails whenever a change to the
++    /// attribute is not accompanied by a regenerated spec, or whenever a
++    /// regeneration drops a documented status — instead of the client contract
++    /// regressing unnoticed.
++    ///
++    /// Text-only note: this comment is `cfg(test)`-level prose. It changes no
++    /// source line, binary or code digest, so the arm builds do not need re-running
++    /// for it.
++    #[test]
++    fn committed_spec_declares_the_setup_contract() {
++        let spec = committed_spec();
++        assert_setup_contract(&spec, "resources/gen/openapi.json");
++    }
++}

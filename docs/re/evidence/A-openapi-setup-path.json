@@ -1,0 +1,28 @@
+{
+ "probe": {
+  "method": "GET",
+  "url": "http://127.0.0.1:8086/api/openapi.json",
+  "target": "A' \u2014 the operator's v0.10.0 release instance (binary sha256 9d364fdd...e080), unauthenticated",
+  "recorded_at": "2026-11-12, during this session, with the ssh tunnel to A' up",
+  "re_run": "needs the tunnel (ssh -N -L 127.0.0.1:8086:127.0.0.1:8086 node); GET only \u2014 no POST/PUT/PATCH/DELETE was ever issued to :8086",
+  "bytes": 396302,
+  "http_status": 200,
+  "note": "Re-probing was attempted at report time and failed with curl exit 7 (tunnel down), so this is the recorded observation, not a fresh probe."
+ },
+ "info_version": "0.10.0",
+ "setup_path_responses": [
+  "201",
+  "403",
+  "503"
+ ],
+ "setup_response_has_content_schema": {
+  "201": true,
+  "403": false,
+  "503": false
+ },
+ "components_schemas_ApiErrorBody": null,
+ "compared_against": {
+  "HEAD_committed_spec": "resources/gen/openapi.json before regeneration \u2014 403/503 carry ApiErrorBody, 400/429 absent",
+  "HEAD_regenerated": "201/400/403/429/503, all errors -> #/components/schemas/ApiErrorBody"
+ }
+}

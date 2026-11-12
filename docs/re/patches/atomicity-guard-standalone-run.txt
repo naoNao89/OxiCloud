@@ -1,0 +1,119 @@
+atomicity guard — standalone unit-level runs for patch 0001
+===========================================================
+
+WHY THIS FILE EXISTS
+  `concurrent_burst_admits_exactly_one_request` is classified as a GUARD in the
+  patch header and README. The server-level bursts that exist for both builds
+  are identical (1 served / 63 rejected — docs/re/evidence/c0-burst.tsv for the
+  unpatched binary, c1-burst.tsv for the patched one), so they cannot show what
+  the pre-patch read-then-write shape does wrong. These runs isolate the
+  primitive: both `check_and_increment` bodies verbatim, in-process, against the
+  lockfile's moka, at the three optimisation levels that matter.
+
+INSTRUMENT
+  atomicity-guard-harness.rs (this directory), byte-identical to what ran
+    sha256 8bfd221f3af8f1a888870ae638406fced2a68f525dad85c6b8125444fb3089d0
+  atomicity-guard-harness-Cargo.toml (this directory), byte-identical to what ran
+    sha256 a7149055449655a9db1dd86cf52584e610cbab3c4f4a0cd43447a0fb5f7c4905
+    moka "=0.12.15" with features ["future", "sync"] — the repo's own dependency
+    spec — and three profiles: dev (opt-level 0, cargo's default), opt1 (= the
+    repo's [profile.dev] opt-level = 1, inherited by profile.test, i.e. what
+    `cargo test` builds), opt3 (= the repo's [profile.release] opt-level = 3)
+
+COMMAND (sandbox `rustdev`; no oxicloud checkout, no repo build)
+  ibx.sh put rustdev /data/home/burstcheck2/Cargo.toml   < Cargo.toml
+  ibx.sh put rustdev /data/home/burstcheck2/src/main.rs  < atomicity-guard-harness.rs
+  ibx.sh exec rustdev 'cd /data/home/burstcheck2 &&
+     for p in dev opt1 opt3; do
+       cargo run -q --profile $p -- $p deterministic
+       cargo run -q --profile $p -- $p burst
+     done'
+  (CARGO_TARGET_DIR=/data/home/burstcheck2-target; rustc 1.99.0, cargo 1.99.0)
+
+BODIES (verbatim; only comments dropped)
+  patched  — entry_by_ref(key).and_upsert_with(..) over Window { count, started },
+             copied from src/interfaces/middleware/rate_limit.rs (this patch)
+  original — cache.get(ip).unwrap_or(0) + 1 then cache.insert(ip.to_string(), count),
+             copied from `git show v0.10.0:src/interfaces/middleware/rate_limit.rs`
+  Both use the same builder as the originals: time_to_live(window_secs) 15 s,
+    max_capacity(1_000), one key, budget 1 and budget 8.
+
+MODE `deterministic` — no threads, no timing, no optimisation sensitivity
+  The two halves of the old pair are interleaved by hand: A reads, B reads
+  (A has not written yet), A writes and decides, B writes and decides. This is a
+  legal execution of the pre-0001 code path; it proves the shape is non-atomic
+  without depending on scheduling.
+
+  opt dev  original  interleaved reads (A=1, B=1) -> served=2 of budget 1: A_ok=true B_ok=true
+  opt dev  patched   same two requests, one call each -> Ok(1) then Err(()) (budget 1)
+  opt opt1 original  interleaved reads (A=1, B=1) -> served=2 of budget 1: A_ok=true B_ok=true
+  opt opt1 patched   same two requests, one call each -> Ok(1) then Err(()) (budget 1)
+  opt opt3 original  interleaved reads (A=1, B=1) -> served=2 of budget 1: A_ok=true B_ok=true
+  opt opt3 patched   same two requests, one call each -> Ok(1) then Err(()) (budget 1)
+
+MODE `burst` — the test's own scenario: 64 threads released from one barrier,
+  10 trials per configuration. The harness iterates FOUR configurations per
+  invocation (patched/original x budget 1/8); with the three opt-levels above
+  that is 12 configurations x 10 trials per run, SIX of them patched.
+  `overshoot_trials` counts trials that served more than the budget.
+
+  RUN B (this file's data; ambient load average 2.9–5.0 on 4 vCPUs, the build
+  side compiling concurrently):
+    opt dev  patched  budget=1  [1,1,1,1,1,1,1,1,1,1]  overshoot 0/10
+    opt dev  patched  budget=8  [8,8,8,8,8,8,8,8,8,8]  overshoot 0/10
+    opt dev  original budget=1  [2,1,2,3,1,2,1,1,2,2]  overshoot 6/10  max 3
+    opt dev  original budget=8  [14,9,8,8,9,9,8,10,10,10]  overshoot 7/10  max 14
+    opt opt1 patched  budget=1  [1,1,1,1,1,1,1,1,1,1]  overshoot 0/10
+    opt opt1 patched  budget=8  [8,8,8,8,8,8,8,8,8,8]  overshoot 0/10
+    opt opt1 original budget=1  [2,2,2,1,1,1,1,1,1,1]  overshoot 3/10  max 2
+    opt opt1 original budget=8  [8,8,8,9,8,9,12,8,8,8]  overshoot 3/10  max 12
+    opt opt3 patched  budget=1  [1,1,1,1,1,1,1,1,1,1]  overshoot 0/10
+    opt opt3 patched  budget=8  [8,8,8,8,8,8,8,8,8,8]  overshoot 0/10
+    opt opt3 original budget=1  [1,1,1,1,1,1,1,1,1,1]  overshoot 0/10
+    opt opt3 original budget=8  [10,8,8,8,8,8,8,8,8,8]  overshoot 1/10  max 10
+
+  RUN A (same instrument without the `deterministic` mode, same manifest and
+  bodies, still under concurrent load; kept because its ordering DIFFERS from
+  run B at the same opt-levels, which is the finding):
+    opt dev  original budget=1  [1,1,2,1,1,2,2,1,1,1]  overshoot 3/10  max 2
+    opt dev  original budget=8  [8,9,9,8,10,9,10,12,10,9]  overshoot 8/10  max 12
+    opt opt1 original budget=1  [1,1,1,1,1,1,1,1,1,2]  overshoot 1/10  max 2
+    opt opt1 original budget=8  [8,8,8,9,8,8,8,8,8,8]  overshoot 1/10  max 9
+    opt opt3 original budget=1  [1,2,1,1,2,2,2,2,1,2]  overshoot 6/10  max 2
+    opt opt3 original budget=8  [8,8,9,8,9,8,8,8,9,8]  overshoot 3/10  max 9
+    (patched, every configuration: exactly the budget, 0 overshoot trials)
+
+  EARLIER, SUPERSEDED FIRST INSTRUMENT (opt-level 0 only, moka without the
+  "future" feature, different load) measured the original shape overshooting in
+  10/10 trials (2..=4 at budget 1). It is why the like-for-like manifest above
+  exists; it is not part of the table.
+
+READING (measured, not inferred)
+  * The upsert shape served EXACTLY its budget in all of its configurations:
+    SIX per run (patched x budget 1/8 x opt 0/1/3), 10 trials each, i.e. 12
+    patched configurations across runs A+B, 0 overshoot trials — the invariant
+    the guard asserts holds.
+  * The pre-patch shape overshoots, but only sometimes: 0/10 to 8/10 trials
+    depending on opt-level AND ambient load, and the ordering by opt-level
+    REVERSES between runs A and B (opt-3 gave 6/10 in A and 0/10 in B at budget
+    1). From the code alone the outcome is not reproducible — arrival spread on a
+    4-vCPU host is the controlling variable, which is also why the server-level
+    burst (requests spread over ~400 ms) shows nothing at all.
+  * The non-atomicity itself is NOT stochastic: the deterministic interleaving
+    serves 2 on a budget of 1 at every opt-level, and the upsert shape answers
+    Ok(1) then Err(()) for the same two requests.
+  * Consequence for the build side's 3 clean runs of the repo `#[test]` on the
+    v0.10.0 arm: entirely consistent with the measured per-trial overshoot rate
+    at the repo's opt-1 (1/10 to 3/10 here) — three clean runs have probability
+    ~0.3–0.7. A pass on the v0.10.0 arm therefore does not contradict these
+    numbers, and neither does a failure.
+
+STATUS
+  The guard stays a guard: a FLAKY detector of a real, deterministic-in-shape
+  defect. It is not counted in any RED column, and the atomicity half of patch
+  0001 is pinned at the level of the argument (shape + deterministic
+  interleaving), not demonstrated by a test that fails reproducibly.
+  Next variable to control, if a reproducible gate is wanted: arrival spread
+  (start the 64 threads in controlled waves, or measure on an idle machine with
+  the compiler stopped) — not the optimisation level, which alone reverses order
+  between runs.

@@ -61,12 +61,20 @@ export default defineConfig({
 
   // Internal planning notes (docs/plan/*) and AI hand-off prompts
   // aren't user-facing docs and contain raw Rust/pseudocode whose
-  // generics (Option<String>, Vec<SubjectGroup>, …) trip Vue's
+  // generics (Option<String>, Vec<SubjectGroup>, ...) trip Vue's
   // template parser ("Element is missing end tag" because <String>,
   // <SubjectGroup>, etc. look like unclosed HTML tags). Keep them
   // in-tree for engineering reference but skip them at site-build time.
+  //
+  // docs/re/* is the behavioural-RE evidence bundle (experiment matrix,
+  // runtime evidence, corpus tables) and is skipped for the same reason
+  // plus one more: it is full of deliberately literal payload text —
+  // `{{base_url}}`-style placeholders and `<path>`/`<token>` fragments —
+  // which Vue would interpolate as bindings or parse as unresolved
+  // component tags. It is engineering evidence for a PR, not a docs page.
   srcExclude: [
     "plan/**",
+    "re/**",
     "**/*.prompt",
   ],
 

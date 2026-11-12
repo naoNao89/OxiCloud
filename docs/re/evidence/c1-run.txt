@@ -1,0 +1,4 @@
+=== corpus label=c1 url=http://127.0.0.1:18086 db=re_case_c1 bin=/data/re/bin/c1-patched
+=== effective limiter: 
+=== trusted proxy:    
+=== corpus done: /data/re-scratch/out-c1/c1.jsonl (17 records)

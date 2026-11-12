@@ -1,0 +1,540 @@
+# 0002-setup-budget.patch — `/api/setup` gets its own rate-limit budget.
+#
+# Files: src/common/config.rs        (RateLimitConfig fields + defaults + env
+#                                     parsing + config tests)
+#        src/common/config_file.rs   (TOML -> env bridge table, KNOWN)
+#        src/main.rs                 (separate limiter + startup log line)
+#        src/interfaces/middleware/rate_limit.rs  (repoint ONE test — see
+#                                     "LAYERING" below)
+#        docs/config/env.md          (the two new variables)
+#
+# POLICY FLAG: this is a policy change, not a correctness fix, and it is the one
+# patch in this series the user can drop without losing a fix. Dropping it means:
+# `/api/setup` keeps sharing the register budget (5/3600 keyed by client IP), so
+# register traffic can still lock the first-run wizard out and a mistyped setup
+# attempt still spends registration budget.
+#
+# LAYERING (read before building a differential arm)
+#   * GENERATED AGAINST 0001 = sha256
+#       29dd53b9a5af216e0598dcdbbe0a204213eccced06117f4c108fd8e85bcb4098
+#     Use the pair from the same row of docs/re/patches/README.md. Pairing this
+#     file with an older 0001 (e.g. 751ca5a0...) or an older 0002 with this 0001
+#     fails at src/interfaces/middleware/rate_limit.rs (~line 526): the hunk is a
+#     CONTEXT diff against 0001's test module, and the guard test added in
+#     that revision shifts it. `git apply --check` the pair before building an arm:
+#       git apply 0001-limiter-window.patch &&
+#       git apply --check 0002-setup-budget.patch
+#   * Every file except rate_limit.rs is clean at HEAD, and this patch applies to
+#     it directly.
+#   * The rate_limit.rs hunk is a CONTEXT DIFF AGAINST 0001's test module: it
+#     rewrites `two_routes_share_one_budget` (which 0001 leaves asserting the
+#     shared budget — true of the tree at HEAD) into
+#     `setup_and_register_have_separate_budgets`. That test lives in 0001's
+#     patch, so this one cannot apply to a clean tree on its own; the arm to
+#     build is HEAD+0001+0002. The alternative — putting the repoint in 0001 —
+#     was rejected because it would make the HEAD+0001 arm carry a test that
+#     asserts wiring 0001 does not change.
+#
+# WHAT IT CHANGES (behaviour)
+#   1. `RateLimitConfig` gains `setup_max_requests` (5) and `setup_window_secs`
+#      (3600), read from `OXICLOUD_RATE_LIMIT_SETUP_MAX` /
+#      `OXICLOUD_RATE_LIMIT_SETUP_WINDOW_SECS` next to the register/login/
+#      refresh pairs, and registered in the `KNOWN` TOML->env bridge so
+#      `[auth.rate_limit] setup_max = 2` works from a config file too.
+#   2. `main.rs` builds a dedicated `setup_limiter` from those values and layers
+#      it on `setup_route()` instead of `register_limiter`. The startup line now
+#      prints `setup: {max}/{window} s` as well.
+#   3. Defaults are deliberately the SAME numbers register had (5/3600), so an
+#      untouched deployment allows exactly as much setup traffic as before; what
+#      changes is who owns the counter.
+#
+# WHAT IT DELIBERATELY DOES NOT CHANGE
+#   * The middleware function on the setup route is still `rate_limit_register`:
+#     the limiter INSTANCE decides the budget, and adding a `rate_limit_setup`
+#     wrapper would have to live in rate_limit.rs, which is 0001's file (two
+#     patches editing the same function = a conflict, and 0001 must stand alone).
+#     Consequence: the limiter's `tracing::warn!` on a setup 429 says
+#     `endpoint = "register"`. Cosmetic; fix it in a patch that owns
+#     rate_limit.rs if it bothers an operator.
+#   * `/api/auth/login` and the OPAQUE login route keep sharing `login_limiter`:
+#     that sharing is intentional (one password-guessing budget across both
+#     password surfaces).
+#   * No CORS/reverse-proxy limits, no per-account cap, no persistence: the
+#     counter is still per-process and in-memory, so a multi-replica deployment
+#     still multiplies the effective ceiling by the replica count.
+#
+# TESTS THAT PIN IT
+#   * common::config::setup_rate_limit_budget_tests::default_is_five_per_hour —
+#     the documented defaults.
+#   * common::config::setup_rate_limit_budget_tests::
+#     setup_env_vars_do_not_move_the_register_budget — the split property: the
+#     new vars move only the setup fields, and register/login keep their own
+#     defaults. Goes through `AppConfig::from_env()`, so it fails if the parsing
+#     is broken (a `RateLimitConfig::default()` assertion would not).
+#   * common::config_file::tests::known_table_covers_every_env_var — an existing
+#     test that scans `src/` for `env::var("OXICLOUD_...")`; it fails until the
+#     two new names are added to `KNOWN`, which is why that edit is part of this
+#     patch rather than an optional extra.
+#   * rate_limit::tests::setup_and_register_have_separate_budgets — both
+#     directions: spend register's budget (on handler-level 400s), `/setup`
+#     still has its own two slots; and with fresh instances, spend setup's
+#     budget and register's slots are untouched.
+#
+# RED/GREEN
+#   Not a unit-RED patch: the limiter test constructs the two instances it
+#   asserts about, which v0.10.0 can do as well, so it is a guard against a
+#   future re-merge, not evidence of the fix. The observable evidence is at the
+#   HTTP layer against a real server, two arms:
+#     A (v0.10.0 / HEAD):  5× POST /api/auth/register (429s included) then
+#                          POST /api/setup → 429 (setup locked out by register).
+#     B (this patch):      same burst, then POST /api/setup → 201/400 (setup
+#                          untouched), and a setup burst leaves register's
+#                          budget intact.
+#   Both arms are corpus cases; the unit tests above are what CI can run.diff --git a/docs/config/env.md b/docs/config/env.md
+index 55571177..0d1a7174 100644
+--- a/docs/config/env.md
++++ b/docs/config/env.md
+@@ -105,6 +105,8 @@ DPoP cryptographically binds a session cookie to a browser-held ECDSA keypair (P
+ | `OXICLOUD_RATE_LIMIT_LOGIN_WINDOW_SECS` | `60` | Login rate-limit window (seconds) |
+ | `OXICLOUD_RATE_LIMIT_REGISTER_MAX` | `5` | Max registration attempts per IP per window |
+ | `OXICLOUD_RATE_LIMIT_REGISTER_WINDOW_SECS` | `3600` | Registration rate-limit window (seconds) |
++| `OXICLOUD_RATE_LIMIT_SETUP_MAX` | `5` | Max `/api/setup` (first-run wizard) requests per IP per window. Separate budget from registration, so neither endpoint can spend the other's |
++| `OXICLOUD_RATE_LIMIT_SETUP_WINDOW_SECS` | `3600` | Setup rate-limit window (seconds) |
+ | `OXICLOUD_RATE_LIMIT_REFRESH_MAX` | `20` | Max token refresh attempts per IP per window |
+ | `OXICLOUD_RATE_LIMIT_REFRESH_WINDOW_SECS` | `60` | Refresh rate-limit window (seconds) |
+ | `OXICLOUD_RATE_LIMIT_USER_PROFILE_MAX` | `60` | Max user-profile lookups per **caller** per window |
+@@ -114,9 +116,10 @@ DPoP cryptographically binds a session cookie to a browser-held ECDSA keypair (P
+ | `OXICLOUD_LOCKOUT_MAX_FAILURES` | `5` | Consecutive failed logins before account lockout |
+ | `OXICLOUD_LOCKOUT_DURATION_SECS` | `900` | Account lockout duration (15 minutes) |
+ 
+-Login, register and refresh are keyed on the **client IP** and guard the
+-unauthenticated front door. User-profile and delta-upload are keyed on
+-the **caller id** and guard an authenticated user against exhausting a
++Login, register, refresh and setup are keyed on the **client IP** and guard the
++unauthenticated front door (setup, the one-time first-run wizard, has its own
++budget so register traffic cannot consume it). User-profile and delta-upload are
++keyed on the **caller id** and guard an authenticated user against exhausting a
+ shared resource.
+ 
+ That distinction decides which knob to reach for. When several actors
+diff --git a/src/common/config.rs b/src/common/config.rs
+index 1590d727..fd9f61c8 100644
+--- a/src/common/config.rs
++++ b/src/common/config.rs
+@@ -1713,6 +1713,18 @@ pub struct RateLimitConfig {
+     pub register_max_requests: u32,
+     /// Registration rate-limit window in seconds (default: 3600)
+     pub register_window_secs: u64,
++    /// Max `/api/setup` requests per IP per window (default: 5).
++    ///
++    /// `/api/setup` is not "another registration endpoint": it is the one-time
++    /// first-run wizard, reachable exactly once in an instance's life, and it is
++    /// blocked forever afterwards. Sharing the register budget meant a burst of
++    /// registrations could lock the operator out of setup (and a mistyped setup
++    /// attempt could spend the registration budget), so setup gets its own
++    /// instance built from these values. Same defaults as register — an operator
++    /// who sets nothing sees the same numbers — but they now move independently.
++    pub setup_max_requests: u32,
++    /// Setup rate-limit window in seconds (default: 3600)
++    pub setup_window_secs: u64,
+     /// Max token refresh attempts per IP per window (default: 20)
+     pub refresh_max_requests: u32,
+     /// Refresh rate-limit window in seconds (default: 60)
+@@ -1757,6 +1769,11 @@ impl Default for RateLimitConfig {
+             login_window_secs: 60,
+             register_max_requests: 5,
+             register_window_secs: 3600,
++            // Same numbers as register, deliberately: the split is about who
++            // owns the budget, not about changing how much setup traffic is
++            // allowed on an untouched deployment.
++            setup_max_requests: 5,
++            setup_window_secs: 3600,
+             refresh_max_requests: 20,
+             refresh_window_secs: 60,
+             lockout_max_failures: 5,
+@@ -4065,6 +4082,16 @@ impl AppConfig {
+         {
+             config.auth.rate_limit.register_window_secs = val;
+         }
++        if let Ok(v) = env::var("OXICLOUD_RATE_LIMIT_SETUP_MAX").map(|v| v.parse::<u32>())
++            && let Ok(val) = v
++        {
++            config.auth.rate_limit.setup_max_requests = val;
++        }
++        if let Ok(v) = env::var("OXICLOUD_RATE_LIMIT_SETUP_WINDOW_SECS").map(|v| v.parse::<u64>())
++            && let Ok(val) = v
++        {
++            config.auth.rate_limit.setup_window_secs = val;
++        }
+         if let Ok(v) = env::var("OXICLOUD_RATE_LIMIT_REFRESH_MAX").map(|v| v.parse::<u32>())
+             && let Ok(val) = v
+         {
+@@ -6529,3 +6556,87 @@ mod db_connection_string_env_fallback_tests {
+         wipe();
+     }
+ }
++
++#[cfg(test)]
++mod setup_rate_limit_budget_tests {
++    //! `/api/setup` has its own rate-limit budget, with its own env vars.
++    //!
++    //! Same shape as the sibling `db_connection_string_env_fallback_tests`:
++    //! module-local `ENV_GUARD` around the mutation, keys wiped afterwards.
++    //! `AppConfig::from_env()` is the subject because that is where
++    //! `OXICLOUD_RATE_LIMIT_*` is read — asserting on `RateLimitConfig::default()`
++    //! alone would pass with the parsing broken.
++    //!
++    //! Not gated on `integration_tests` (the sibling is, for its `DATABASE_URL`
++    //! race): nothing here touches `DATABASE_URL`, and only this module reads the
++    //! `OXICLOUD_RATE_LIMIT_SETUP_*` keys.
++    use super::{AppConfig, RateLimitConfig};
++    use std::env;
++    use std::sync::Mutex;
++
++    static ENV_GUARD: Mutex<()> = Mutex::new(());
++
++    const MAX_KEY: &str = "OXICLOUD_RATE_LIMIT_SETUP_MAX";
++    const WINDOW_KEY: &str = "OXICLOUD_RATE_LIMIT_SETUP_WINDOW_SECS";
++
++    fn wipe() {
++        // SAFETY: `ENV_GUARD` serialises the mutation inside this module, and no
++        // other test in the build reads or writes these two keys.
++        unsafe {
++            env::remove_var(MAX_KEY);
++            env::remove_var(WINDOW_KEY);
++        }
++    }
++
++    fn set(k: &str, v: &str) {
++        unsafe { env::set_var(k, v) };
++    }
++
++    /// Defaults: 5 attempts per hour, the same numbers the register budget had
++    /// while the two shared one instance.
++    #[test]
++    fn default_is_five_per_hour() {
++        assert_eq!(RateLimitConfig::default().setup_max_requests, 5);
++        assert_eq!(RateLimitConfig::default().setup_window_secs, 3600);
++    }
++
++    /// The two budgets are separate fields, not one value read twice: setting
++    /// the setup vars moves only the setup limiter's inputs, and the register
++    /// pair keeps its own defaults. That independence is the whole point of the
++    /// split (a registration burst can no longer lock the first-run wizard out,
++    /// and vice versa), so it is what the test pins.
++    #[test]
++    fn setup_env_vars_do_not_move_the_register_budget() {
++        let _g = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
++
++        wipe();
++        let rl = AppConfig::from_env().auth.rate_limit;
++        assert_eq!(
++            (rl.setup_max_requests, rl.setup_window_secs),
++            (5, 3600),
++            "unset OXICLOUD_RATE_LIMIT_SETUP_* must keep the 5/3600 default"
++        );
++
++        wipe();
++        set(MAX_KEY, "2");
++        set(WINDOW_KEY, "120");
++        let rl = AppConfig::from_env().auth.rate_limit;
++        assert_eq!(
++            (rl.setup_max_requests, rl.setup_window_secs),
++            (2, 120),
++            "OXICLOUD_RATE_LIMIT_SETUP_MAX / _WINDOW_SECS must be honoured"
++        );
++        assert_eq!(
++            (rl.register_max_requests, rl.register_window_secs),
++            (5, 3600),
++            "the register budget must not follow the setup vars"
++        );
++        assert_eq!(
++            (rl.login_max_requests, rl.login_window_secs),
++            (10, 60),
++            "nor must login"
++        );
++
++        wipe();
++    }
++}
+diff --git a/src/common/config_file.rs b/src/common/config_file.rs
+index 4e9bf30d..d181ce1c 100644
+--- a/src/common/config_file.rs
++++ b/src/common/config_file.rs
+@@ -140,6 +140,8 @@ pub const KNOWN: &[(&str, &str)] = &[
+     ("auth", "OXICLOUD_RATE_LIMIT_REFRESH_WINDOW_SECS"),
+     ("auth", "OXICLOUD_RATE_LIMIT_REGISTER_MAX"),
+     ("auth", "OXICLOUD_RATE_LIMIT_REGISTER_WINDOW_SECS"),
++    ("auth", "OXICLOUD_RATE_LIMIT_SETUP_MAX"),
++    ("auth", "OXICLOUD_RATE_LIMIT_SETUP_WINDOW_SECS"),
+     ("auth", "OXICLOUD_RATE_LIMIT_USER_PROFILE_MAX"),
+     ("auth", "OXICLOUD_RATE_LIMIT_USER_PROFILE_WINDOW_SECS"),
+     ("auth", "OXICLOUD_REFRESH_TOKEN_EXPIRY_SECS"),
+diff --git a/src/main.rs b/src/main.rs
+index 2b34c269..6a43f2ca 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -968,14 +968,29 @@ async fn run(config: common::config::AppConfig) -> Result<(), Box<dyn std::error
+             rl.refresh_window_secs,
+             100_000,
+         ));
++        // POLICY (patch 0002): `/api/setup` is the one-time first-run wizard, so
++        // it gets its OWN instance and therefore its own budget. Handing it
++        // `register_limiter` (the previous wiring) meant one budget covered both
++        // endpoints: a burst of registrations — or a bot probing
++        // `/api/auth/register` — exhausted the 5/3600 budget and locked the
++        // operator out of first-run setup, and a mistyped setup attempt spent
++        // registration budget. Same default numbers as register, so an untouched
++        // deployment sees no change in how much traffic each allows.
++        let setup_limiter = Arc::new(RateLimiter::new(
++            rl.setup_max_requests,
++            rl.setup_window_secs,
++            100_000,
++        ));
+         tracing::info!(
+-            "Rate limiting enabled — login: {}/{} s, register: {}/{} s, refresh: {}/{} s",
++            "Rate limiting enabled — login: {}/{} s, register: {}/{} s, refresh: {}/{} s, setup: {}/{} s",
+             rl.login_max_requests,
+             rl.login_window_secs,
+             rl.register_max_requests,
+             rl.register_window_secs,
+             rl.refresh_max_requests,
+             rl.refresh_window_secs,
++            rl.setup_max_requests,
++            rl.setup_window_secs,
+         );
+ 
+         // Auth routes split by rate-limit policy
+@@ -1070,10 +1085,15 @@ async fn run(config: common::config::AppConfig) -> Result<(), Box<dyn std::error
+         let opaque_params_public =
+             oxicloud::interfaces::api::handlers::opaque_auth_handler::opaque_params_routes()
+                 .with_state(app_state.clone());
+-        // One-time setup route — public, rate-limited like register
++        // One-time setup route — public, and rate-limited from its OWN budget
++        // (`setup_limiter`), not register's: see the POLICY note above. The
++        // middleware wrapper is `rate_limit_register` because that is the layer
++        // the module exports for a POST-budget pair; the limiter instance is
++        // what decides the budget, and the warning line it emits on a 429 names
++        // the endpoint `register`.
+         let setup_router = setup_route()
+             .layer(axum::middleware::from_fn_with_state(
+-                register_limiter.clone(),
++                setup_limiter.clone(),
+                 rate_limit_register,
+             ))
+             .with_state(app_state.clone());
+diff --git a/src/interfaces/middleware/rate_limit.rs b/src/interfaces/middleware/rate_limit.rs
+--- a/src/interfaces/middleware/rate_limit.rs
++++ b/src/interfaces/middleware/rate_limit.rs
+@@ -532,100 +532,67 @@ mod tests {
+         assert_eq!(limiter.check_and_increment("other"), Ok(1));
+     }
+ 
+-    /// One `Arc<RateLimiter>` is one budget, whichever route the request takes —
+-    /// and a handler-level 400 spends it exactly like a success.
++    /// `/api/setup` and `/api/auth/register` have SEPARATE budgets: `main.rs`
++    /// builds a dedicated `RateLimiter` for setup out of
++    /// `OXICLOUD_RATE_LIMIT_SETUP_*`, so exhausting either route leaves the
++    /// other's slot intact — asserted in both directions.
+     ///
+-    /// Both halves are `main.rs` wiring facts: the auth routers share an instance
+-    /// wherever the policy is one budget (`login` also covers the OPAQUE login
+-    /// route), and `/api/setup` is handed the very same `register_limiter` the
+-    /// register route uses — so exhausting the budget on one locks the other out,
+-    /// which is what the assertions below pin (`setup_route()` +
+-    /// `from_fn_with_state(register_limiter.clone(), rate_limit_register)`).
++    /// This replaces `two_routes_share_one_budget`, which pinned the wiring this
++    /// patch changes: `/api/setup` used to be handed the very same
++    /// `register_limiter`, so one 5-per-hour budget covered both endpoints — a
++    /// burst of registrations (or a bot probing `/api/auth/register`) locked the
++    /// operator out of the first-run wizard, and a mistyped setup attempt spent
++    /// registration budget.
+     ///
+-    /// Not a RED test: both behaviours hold on v0.10.0 and after
+-    /// `0001-limiter-window.patch` alike. It guards the accounting through the
+-    /// window rewrite (a per-key window must not become a per-route one) and the
+-    /// 429 body + header shape.
++    /// Not a RED test: it builds the two instances it asserts about, which is
++    /// possible on v0.10.0 as well, so this is a guard rather than evidence of
++    /// the fix (the evidence is the two-arm run of `/api/setup` vs
++    /// `/api/auth/register` against a real server). What it guards: the
++    /// accounting stays per INSTANCE (a process-wide cache or a "share the
++    /// limiter to save memory" refactor fails here), and a handler-level 400
++    /// still spends the budget of the limiter in front of it.
++    ///
++    /// Symbols: pre-existing ones only (`RateLimiter::new`, the `rate_limit_*`
++    /// layers, the `retry-after` header) plus this module's own
++    /// `retry_after_header`, so the module still compiles on v0.10.0.
+     #[tokio::test]
+-    async fn two_routes_share_one_budget() {
+-        let limiter = Arc::new(RateLimiter::new(2, 60, 100));
+-
+-        // Two routers, one limiter instance — the shape main.rs builds for
+-        // register + setup.
+-        let register_routes = Router::new().route("/auth/register", get(ok)).layer(
+-            axum::middleware::from_fn_with_state(limiter.clone(), rate_limit_register),
+-        );
+-        let setup_routes =
+-            Router::new()
+-                .route("/setup", get(ok))
+-                .layer(axum::middleware::from_fn_with_state(
+-                    limiter.clone(),
+-                    rate_limit_register,
+-                ));
+-        let app = register_routes.merge(setup_routes);
+-
+-        let req = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+-
+-        let first = app.clone().oneshot(req("/auth/register")).await.unwrap();
+-        assert_eq!(first.status(), StatusCode::OK);
+-
+-        // 2nd request overall, on the OTHER route: still inside the shared
+-        // budget, which only holds if both routes share one cache.
+-        let second = app.clone().oneshot(req("/setup")).await.unwrap();
+-        assert_eq!(second.status(), StatusCode::OK);
+-
+-        // 3rd request overall: rejected, with the Retry-After header.
+-        let third = app.clone().oneshot(req("/auth/register")).await.unwrap();
+-        assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
+-        assert_eq!(third.headers().get("retry-after").unwrap(), "60");
+-
+-        // The pin: exhausting the budget on /auth/register has already locked
+-        // out /setup.
+-        let fourth = app.clone().oneshot(req("/setup")).await.unwrap();
+-        assert_eq!(fourth.status(), StatusCode::TOO_MANY_REQUESTS);
+-        assert_eq!(fourth.headers().get("retry-after").unwrap(), "60");
+-
+-        let body = axum::body::to_bytes(fourth.into_body(), 4096)
+-            .await
+-            .unwrap();
+-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+-        assert_eq!(json["error"], "Too many requests");
+-        assert_eq!(json["retry_after_secs"], 60);
+-
+-        // A handler-level rejection burns budget too: the limiter runs before
+-        // `next.run`, so a typo in the setup wizard — 400 from validation,
+-        // never reaching the database — spends the SAME register/setup budget a
+-        // real registration would. With `max_requests = 2`, two 400s are
+-        // served and the third request (on the other route) is already 429.
+-        let strict = Arc::new(RateLimiter::new(2, 60, 100));
+-        let rejecting_register = Router::new()
+-            .route("/auth/register", post(bad_request))
+-            .layer(axum::middleware::from_fn_with_state(
+-                strict.clone(),
+-                rate_limit_register,
+-            ));
+-        let rejecting_setup =
++    async fn setup_and_register_have_separate_budgets() {
++        // Mirrors the wiring in `main.rs`: one limiter instance per route
++        // group. Budget 2 keeps exhaustion cheap; the register route answers
++        // 400 (a validation rejection must still count).
++        fn app(register_limiter: Arc<RateLimiter>, setup_limiter: Arc<RateLimiter>) -> Router {
+             Router::new()
+-                .route("/setup", get(ok))
++                .route("/auth/register", post(bad_request))
+                 .layer(axum::middleware::from_fn_with_state(
+-                    strict.clone(),
++                    register_limiter,
+                     rate_limit_register,
+-                ));
+-        let rejecting = rejecting_register.merge(rejecting_setup);
++                ))
++                .merge(Router::new().route("/setup", get(ok)).layer(
++                    axum::middleware::from_fn_with_state(setup_limiter, rate_limit_register),
++                ))
++        }
+ 
+-        let post_req = |uri: &str| {
++        let register_req = || {
+             Request::builder()
+                 .method("POST")
+-                .uri(uri)
++                .uri("/auth/register")
++                .body(Body::empty())
++                .unwrap()
++        };
++        let setup_req = || {
++            Request::builder()
++                .uri("/setup")
+                 .body(Body::empty())
+                 .unwrap()
+         };
++
++        // ── Direction 1: spend register's budget; setup keeps its own slot. ──
++        let d1 = app(
++            Arc::new(RateLimiter::new(2, 60, 100)),
++            Arc::new(RateLimiter::new(2, 60, 100)),
++        );
+         for attempt in 1..=2 {
+-            let rejected = rejecting
+-                .clone()
+-                .oneshot(post_req("/auth/register"))
+-                .await
+-                .unwrap();
++            let rejected = d1.clone().oneshot(register_req()).await.unwrap();
+             assert_eq!(
+                 rejected.status(),
+                 StatusCode::BAD_REQUEST,
+@@ -636,11 +603,59 @@ mod tests {
+                 "a 400 is not a 429 — no Retry-After"
+             );
+         }
+-        let exhausted = rejecting.clone().oneshot(req("/setup")).await.unwrap();
++        let spent = d1.clone().oneshot(register_req()).await.unwrap();
++        assert_eq!(
++            spent.status(),
++            StatusCode::TOO_MANY_REQUESTS,
++            "two 400s spent register's budget"
++        );
++        let spent_after = retry_after_header(&spent);
++        assert!(
++            (1..=60).contains(&spent_after),
++            "the 429 still carries a remaining-window Retry-After; got {spent_after}"
++        );
++
++        for n in 1..=2 {
++            let own_slot = d1.clone().oneshot(setup_req()).await.unwrap();
++            assert_eq!(
++                own_slot.status(),
++                StatusCode::OK,
++                "/setup request {n}: its budget is untouched by register's"
++            );
++        }
++        let setup_spent = d1.clone().oneshot(setup_req()).await.unwrap();
+         assert_eq!(
+-            exhausted.status(),
++            setup_spent.status(),
+             StatusCode::TOO_MANY_REQUESTS,
+-            "the two 400s spent the shared budget, so /setup is locked out"
++            "setup's own budget is spent after its own two requests"
+         );
++
++        // ── Direction 2, fresh instances: spend setup's first; register's slot
++        //    is intact. ─────────────────────────────────────────────────────────
++        let d2 = app(
++            Arc::new(RateLimiter::new(2, 60, 100)),
++            Arc::new(RateLimiter::new(2, 60, 100)),
++        );
++        for n in 1..=2 {
++            assert_eq!(
++                d2.clone().oneshot(setup_req()).await.unwrap().status(),
++                StatusCode::OK,
++                "setup request {n}"
++            );
++        }
++        assert_eq!(
++            d2.clone().oneshot(setup_req()).await.unwrap().status(),
++            StatusCode::TOO_MANY_REQUESTS,
++            "setup's own budget is spent"
++        );
++        for n in 1..=2 {
++            let register_ok = d2.clone().oneshot(register_req()).await.unwrap();
++            assert_eq!(
++                register_ok.status(),
++                StatusCode::BAD_REQUEST,
++                "register request {n}: its budget is untouched by setup's"
++            );
++            assert!(register_ok.headers().get("retry-after").is_none());
++        }
+     }
+ }

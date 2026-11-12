@@ -1,0 +1,471 @@
+Causal-gate unit-test runs (per arm: GREEN on the patched tree, RED on the v0.10.0 graft)
+command: cargo test --lib -- rate_limit trusted_proxy error_response setup_openapi_contract
+RED side: docs/re/scripts/graft-tests.sh <arm> /data/oxi-v010 <files>
+
+=== c1-green-rate_limit-trusted_proxy-error_response-openapi.test.log ===
+tree    /data/oxi
+rev     389e161bc6b94d720f50505e4e9c8219e56124d3
+diff    f6d9897b43fb103c7f29e2ff688a81c8ac32ab0ca3da9d25605fb14b9cec8a31
+cmd     cargo test --lib -- rate_limit trusted_proxy error_response setup_openapi_contract
+df      /dev/vdb         20G   19G  952M  96% /data
+test common::config::setup_rate_limit_budget_tests::default_is_five_per_hour ... ok
+test common::config::setup_rate_limit_budget_tests::setup_env_vars_do_not_move_the_register_budget ... ok
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::committed_spec_declares_the_setup_contract ... FAILED
+test interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::setup_admin_attribute_declares_the_contract ... ok
+test interfaces::api::handlers::rt_ws::tests::error_response_shape ... ok
+test interfaces::errors::tests::error_response_length_oracle ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... ok
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... ok
+test interfaces::middleware::rate_limit::tests::setup_and_register_have_separate_budgets ... ok
+test interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_any ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_host ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_subnet ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_mapped_matches_v4_cidr ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv6_cidr_loopback ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_invalid_prefix ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_valid ... ok
+test interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key ... ok
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 1383 filtered out; finished in 5.00s
+--- verbatim failure blocks ---
+failures:
+
+---- interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::committed_spec_declares_the_setup_contract stdout ----
+
+thread 'interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::committed_spec_declares_the_setup_contract' (2450738) panicked at src/interfaces/api/handlers/auth_handler.rs:2125:13:
+resources/gen/openapi.json: POST /api/setup must declare 400; it declares ["201", "403", "503"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::committed_spec_declares_the_setup_contract
+
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 1383 filtered out; finished in 5.00s
+
+error: test failed, to rerun pass `--lib`
+
+=== c1-post-regen-setup_openapi_contract.test.log ===
+tree    /data/oxi
+rev     389e161bc6b94d720f50505e4e9c8219e56124d3
+diff    084a21beddf55632259c32886bff232893bc984d091e7aa2d064ac7f1f2bf847
+cmd     cargo test --lib -- setup_openapi_contract
+df      /dev/vdb         20G   19G  952M  96% /data
+test interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::committed_spec_declares_the_setup_contract ... ok
+test interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::setup_admin_attribute_declares_the_contract ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1400 filtered out; finished in 0.02s
+
+=== c1l-green-rate_limit-trusted_proxy-error_response.test.log ===
+tree    /data/oxi
+rev     389e161bc6b94d720f50505e4e9c8219e56124d3
+diff    12f33782a0bcbdea77481ce0a0ac093ff590ea5c1b13cdf60d407814ed617553
+cmd     cargo test --lib -- rate_limit trusted_proxy error_response
+df      /dev/vdb         20G   19G  1.3G  94% /data
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::api::handlers::rt_ws::tests::error_response_shape ... ok
+test interfaces::errors::tests::error_response_length_oracle ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... ok
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... ok
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_any ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_host ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_subnet ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_mapped_matches_v4_cidr ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv6_cidr_loopback ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_invalid_prefix ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_valid ... ok
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 1383 filtered out; finished in 5.00s
+
+=== c1p-green-rate_limit-trusted_proxy-error_response.test.log ===
+tree    /data/oxi
+rev     389e161bc6b94d720f50505e4e9c8219e56124d3
+diff    5fccb4a8ffec4025c42212cfccae711a1f0bb10e9958e06449cf8e2d7b99beaf
+cmd     cargo test --lib -- rate_limit trusted_proxy error_response
+df      /dev/vdb         20G   19G  947M  96% /data
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::api::handlers::rt_ws::tests::error_response_shape ... ok
+test interfaces::errors::tests::error_response_length_oracle ... ok
+test interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_any ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_host ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_subnet ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_mapped_matches_v4_cidr ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv6_cidr_loopback ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_invalid_prefix ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_valid ... ok
+test interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1383 filtered out; finished in 0.00s
+
+=== red-c1.test.log ===
+tree    /data/oxi-v010
+rev     496d25b89f672ffe3395042a0584f24d490ed761
+diff    79cc25ef1ad6e13d687145d5a92f40794901d9c7e3bc5e95a6e383d4783e3d4e
+cmd     cargo test --lib -- rate_limit trusted_proxy error_response setup_openapi_contract
+df      /dev/vdb         20G   19G  861M  96% /data
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::committed_spec_declares_the_setup_contract ... FAILED
+test interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::setup_admin_attribute_declares_the_contract ... FAILED
+test interfaces::api::handlers::rt_ws::tests::error_response_shape ... ok
+test interfaces::errors::tests::error_response_length_oracle ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... FAILED
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... FAILED
+test interfaces::middleware::rate_limit::tests::setup_and_register_have_separate_budgets ... ok
+test interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop ... FAILED
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_any ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_host ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_subnet ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_mapped_matches_v4_cidr ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv6_cidr_loopback ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_invalid_prefix ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_valid ... ok
+test interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1338 filtered out; finished in 0.00s
+test result: FAILED. 11 passed; 6 failed; 0 ignored; 0 measured; 1322 filtered out; finished in 5.00s
+--- verbatim failure blocks ---
+failures:
+
+---- interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::committed_spec_declares_the_setup_contract stdout ----
+
+thread 'interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::committed_spec_declares_the_setup_contract' (2473661) panicked at src/interfaces/api/handlers/auth_handler.rs:2161:13:
+resources/gen/openapi.json: POST /api/setup must declare 400; it declares ["201", "403", "503"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::setup_admin_attribute_declares_the_contract stdout ----
+
+thread 'interfaces::api::handlers::auth_handler::setup_openapi_contract_tests::setup_admin_attribute_declares_the_contract' (2473662) panicked at src/interfaces/api/handlers/auth_handler.rs:2161:13:
+ApiDoc::openapi(): POST /api/setup must declare 400; it declares ["201", "403", "503"]
+
+---- interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop stdout ----
+
+thread 'interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop' (2473668) panicked at src/interfaces/middleware/trusted_proxy.rs:359:9:
+child run of client_ip_resolves_the_rightmost_untrusted_hop failed (ExitStatus(unix_wait_status(25856))); stdout:
+
+running 1 test
+test interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop ... FAILED
+
+failures:
+
+---- interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop stdout ----
+
+thread 'interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop' (2473670) panicked at src/interfaces/middleware/trusted_proxy.rs:433:9:
+assertion `left == right` failed
+  left: "6.6.6.6"
+ right: "203.0.113.9"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1338 filtered out; finished in 0.00s
+
+
+stderr:
+
+
+---- interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key stdout ----
+
+thread 'interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key' (2473678) panicked at src/interfaces/middleware/trusted_proxy.rs:359:9:
+child run of spoofed_prefix_cannot_choose_the_rate_limit_key failed (ExitStatus(unix_wait_status(25856))); stdout:
+
+running 1 test
+test interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key ... FAILED
+
+failures:
+
+---- interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key stdout ----
+
+thread 'interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key' (2473680) panicked at src/interfaces/middleware/trusted_proxy.rs:627:9:
+assertion `left == right` failed: the appended hop is the client
+  left: "6.6.6.6"
+ right: "203.0.113.9"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+
+=== red-c1l.test.log ===
+tree    /data/oxi-v010
+rev     496d25b89f672ffe3395042a0584f24d490ed761
+diff    bc73cf079daf2279bdf0f30b43afd288bad8aa515d8c4ff75502446bde05a452
+cmd     cargo test --lib -- rate_limit trusted_proxy error_response setup_openapi_contract
+df      /dev/vdb         20G   19G  861M  96% /data
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::api::handlers::rt_ws::tests::error_response_shape ... ok
+test interfaces::errors::tests::error_response_length_oracle ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... FAILED
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... FAILED
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_any ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_host ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_subnet ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_mapped_matches_v4_cidr ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv6_cidr_loopback ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_invalid_prefix ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_valid ... ok
+test result: FAILED. 11 passed; 2 failed; 0 ignored; 0 measured; 1322 filtered out; finished in 5.00s
+--- verbatim failure blocks ---
+failures:
+
+---- interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses stdout ----
+
+thread 'interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses' (2472533) panicked at src/interfaces/middleware/rate_limit.rs:329:9:
+≈3 s of the 6 s window are gone, so the wait must shrink: 6 s vs 6 s (equal values mean the header is reporting the configured window again)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window stdout ----
+
+thread 'interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window' (2472532) panicked at src/interfaces/middleware/rate_limit.rs:259:9:
+assertion `left == right` failed: t≈5 s is one 4 s window past the FIRST request, so the client is let back in; the pre-patch code kept it out until one window after the rejected attempt at t≈2 s (t≈6 s)
+  left: Err(())
+ right: Ok(1)
+
+
+failures:
+    interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window
+    interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses
+
+test result: FAILED. 11 passed; 2 failed; 0 ignored; 0 measured; 1322 filtered out; finished in 5.00s
+
+error: test failed, to rerun pass `--lib`
+
+=== red-c1p.test.log ===
+tree    /data/oxi-v010
+rev     496d25b89f672ffe3395042a0584f24d490ed761
+diff    1571ca64a30a0176f9cdd848a857ac0ac68af848d49748743b1813de7008ef5a
+cmd     cargo test --lib -- rate_limit trusted_proxy error_response setup_openapi_contract
+df      /dev/vdb         20G   19G  861M  96% /data
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::api::handlers::rt_ws::tests::error_response_shape ... ok
+test interfaces::errors::tests::error_response_length_oracle ... ok
+test interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop ... FAILED
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_any ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_host ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_cidr_subnet ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv4_mapped_matches_v4_cidr ... ok
+test interfaces::middleware::trusted_proxy::tests::ipv6_cidr_loopback ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_invalid_prefix ... ok
+test interfaces::middleware::trusted_proxy::tests::parse_cidr_valid ... ok
+test interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1333 filtered out; finished in 0.00s
+test result: FAILED. 10 passed; 2 failed; 0 ignored; 0 measured; 1322 filtered out; finished in 0.00s
+--- verbatim failure blocks ---
+failures:
+
+---- interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop stdout ----
+
+thread 'interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop' (2473026) panicked at src/interfaces/middleware/trusted_proxy.rs:359:9:
+child run of client_ip_resolves_the_rightmost_untrusted_hop failed (ExitStatus(unix_wait_status(25856))); stdout:
+
+running 1 test
+test interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop ... FAILED
+
+failures:
+
+---- interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop stdout ----
+
+thread 'interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop' (2473037) panicked at src/interfaces/middleware/trusted_proxy.rs:433:9:
+assertion `left == right` failed
+  left: "6.6.6.6"
+ right: "203.0.113.9"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    interfaces::middleware::trusted_proxy::tests::client_ip_resolves_the_rightmost_untrusted_hop
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1333 filtered out; finished in 0.00s
+
+
+stderr:
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key stdout ----
+
+thread 'interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key' (2473035) panicked at src/interfaces/middleware/trusted_proxy.rs:359:9:
+child run of spoofed_prefix_cannot_choose_the_rate_limit_key failed (ExitStatus(unix_wait_status(25856))); stdout:
+
+running 1 test
+test interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key ... FAILED
+
+failures:
+
+---- interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key stdout ----
+
+thread 'interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key' (2473038) panicked at src/interfaces/middleware/trusted_proxy.rs:627:9:
+assertion `left == right` failed: the appended hop is the client
+  left: "6.6.6.6"
+ right: "203.0.113.9"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    interfaces::middleware::trusted_proxy::tests::spoofed_prefix_cannot_choose_the_rate_limit_key
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1333 filtered out; finished in 0.00s
+
+
+stderr:
+
+
+
+
+
+=== PHASE E — the new test concurrent_burst_admits_exactly_one_request ===
+RED side: docs/re/scripts/graft-tests.sh /data/re/arm-src/c1l-new /data/oxi-v010 rate_limit
+   (module sha256 ac735bb0..., grafted onto the clean v0.10.0 worktree, moka 0.12.15 in its lockfile)
+GREEN side: cargo test --lib -- rate_limit on HEAD+0001 (c1l).
+NOTE: c1 (HEAD+0001..0004) could NOT be run — the republished 0002 does not apply on
+      top of the republished 0001 (git apply --check: patch failed at rate_limit.rs:526).
+
+--- red-guard-new.run1.log ---
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... FAILED
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... FAILED
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 1330 filtered out; finished in 5.00s
+--- red-guard-new.run2.log ---
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... FAILED
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... FAILED
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 1330 filtered out; finished in 5.00s
+--- red-guard-new.run3.log ---
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... FAILED
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... FAILED
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 1330 filtered out; finished in 5.00s
+--- green-c1l-new.run1.log ---
+
+=== phase-e log (verbatim) ===
+2256cb5cd8f6a68dae44671e1a99ceb644de031f90ffcbc0284ecd66625c0c3f  -
+ac735bb06969482fac652ca705dca28f33750b2580bcd7756ac096b7cb5c23e1  /data/re/arm-src/c1l-new/src/interfaces/middleware/rate_limit.rs
+== graft src/interfaces/middleware/rate_limit.rs  (mode=required; target already had a module: no)
+   target before sha256 d7b1e3d8ff63538d3c0a62734448cf943868b4e5648e931800b88e357b75925c  ->  after sha256 c1259e31b54e37785c992322692e7a75b2514e2af997d96729d9a8e2e8d76a38
+   WARNING: identifiers not defined in /data/oxi-v010/src (compile-failure risk, verify by compiling): After ASCII BAD_REQUEST Both Corpus Either Fixed GREEN GUARD Handler LEFT Measured Not One OPAQUE OTHER RED Retry SAME Tests That The Timing Too TOO_MANY_REQUESTS Two Under UNIT What With 
+== graft complete (rc=0)
+[16:43:32] RED on v0.10.0 (expect FAIL) — moka in the worktree lock: version = "0.12.15"
+--- red-guard-new run1: test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 1330 filtered out; finished in 5.00s
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... FAILED
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... FAILED
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok
+--- red-guard-new run2: test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 1330 filtered out; finished in 5.00s
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... FAILED
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... FAILED
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok
+--- red-guard-new run3: test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 1330 filtered out; finished in 5.00s
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... FAILED
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... FAILED
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok
+[16:48:24] cleaned v010 target; df /dev/vdb         20G   17G  2.9G  86% /data
+[16:48:24] GREEN c1l (tree = HEAD+0001+errors.rs) — 3 runs
+
+=== GUARD DISTRIBUTION — concurrent_burst_admits_exactly_one_request, N=10 ===
+Tree: /data/oxi-v010 (tag v0.10.0, PRE-patch production code) + the grafted test module
+      docs/re/scripts/graft-tests.sh /data/re/arm-src/c1l-new /data/oxi-v010 rate_limit
+Invocation per run (same tree, same profile, one test, --exact):
+  cargo test --lib -- interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request --exact
+Profile of record: Cargo.toml [profile.dev] opt-level = 1 (profile.test unset ⇒ inherits dev).
+REPatches' standalone harness measured the identical body at opt-level 0 in-process.
+
+test present: 1 occurrence(s) at line 380
+moka: version="0.12.15"
+profile: opt-level = 1 # DWARF, which is worthless without a debugger. On this crate that # takes target/debug/deps from ~58 GB to ~15-20 GB. Combined with # `split-debuginfo = "unpacked"` (macOS-friendly: what little debug debug = "line-tables-only" split-debuginfo = "unpacked" 
+profile.test: 
+run1: FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s | matched=1
+run2: FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s | matched=1
+run3: FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s | matched=1
+run4: FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s | matched=1
+run5: FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s | matched=1
+run6: pass | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s | matched=1
+run7: FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s | matched=1
+run8: FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s | matched=1
+run9: FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s | matched=1
+run10: FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s | matched=1
+--- guard-v010.run1.log: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s
+thread 'interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request' (2713049) panicked at src/interfaces/middleware/rate_limit.rs:403:9:
+assertion `left == right` failed: exactly one of 64 concurrent requests fits a budget of 1
+  left: 3
+--- guard-v010.run10.log: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s
+thread 'interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request' (2713803) panicked at src/interfaces/middleware/rate_limit.rs:403:9:
+assertion `left == right` failed: exactly one of 64 concurrent requests fits a budget of 1
+  left: 4
+--- guard-v010.run2.log: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s
+thread 'interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request' (2713133) panicked at src/interfaces/middleware/rate_limit.rs:403:9:
+assertion `left == right` failed: exactly one of 64 concurrent requests fits a budget of 1
+  left: 4
+--- guard-v010.run3.log: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s
+thread 'interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request' (2713218) panicked at src/interfaces/middleware/rate_limit.rs:403:9:
+assertion `left == right` failed: exactly one of 64 concurrent requests fits a budget of 1
+  left: 4
+--- guard-v010.run4.log: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s
+thread 'interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request' (2713302) panicked at src/interfaces/middleware/rate_limit.rs:403:9:
+assertion `left == right` failed: exactly one of 64 concurrent requests fits a budget of 1
+  left: 4
+--- guard-v010.run5.log: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s
+thread 'interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request' (2713386) panicked at src/interfaces/middleware/rate_limit.rs:403:9:
+assertion `left == right` failed: exactly one of 64 concurrent requests fits a budget of 1
+  left: 4
+--- guard-v010.run6.log: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s
+--- guard-v010.run7.log: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s
+thread 'interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request' (2713550) panicked at src/interfaces/middleware/rate_limit.rs:403:9:
+assertion `left == right` failed: exactly one of 64 concurrent requests fits a budget of 1
+  left: 4
+--- guard-v010.run8.log: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s
+thread 'interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request' (2713635) panicked at src/interfaces/middleware/rate_limit.rs:403:9:
+assertion `left == right` failed: exactly one of 64 concurrent requests fits a budget of 1
+  left: 4
+--- guard-v010.run9.log: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.00s
+thread 'interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request' (2713719) panicked at src/interfaces/middleware/rate_limit.rs:403:9:
+assertion `left == right` failed: exactly one of 64 concurrent requests fits a budget of 1
+  left: 4
+
+=== C1 leg — HEAD+0001..0004 + errors.rs + regenerated spec (tree diff 73dc9bd4...) ===
+[16:59:38] phase-f state: not finished
+[16:59:38] cleaned v010 target; df /dev/vdb         20G   17G  2.9G  86% /data
+[16:59:38] C1 tree state: 73dc9bd4469d11f2323cfa357e0a0d4b80f2f753b7f482d7722799c2164b9ed0; status:  M docs/architecture/magic-link-auth.md  M docs/config/deployment.md  M docs/config/env.md  M resources/gen/openapi.json  M src/application/services/recipient_notification_service.rs  M src/common/config.rs  M src/common/config_file.rs  M src/interfaces/api/handlers/auth_handler.rs  M src/interfaces/api/handlers/grant_handler.rs  M src/interfaces/errors.rs  M src/interfaces/middleware/rate_limit.rs  M src/interfaces/middleware/trace_span.rs  M src/interfaces/middleware/trusted_proxy.rs  M src/main.rs 
+--- green-c1-new run1: test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1395 filtered out; finished in 5.00s
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... ok
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... ok
+test interfaces::middleware::rate_limit::tests::setup_and_register_have_separate_budgets ... ok
+--- green-c1-new run2: test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1395 filtered out; finished in 5.00s
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... ok
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... ok
+test interfaces::middleware::rate_limit::tests::setup_and_register_have_separate_budgets ... ok
+--- green-c1-new run3: test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1395 filtered out; finished in 5.00s
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... ok
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... ok
+test interfaces::middleware::rate_limit::tests::setup_and_register_have_separate_budgets ... ok
+[17:04:35] PHASE-G DONE; df /dev/vdb         20G   19G  980M  96% /data
+=== C1L leg (verbatim, from phase-e) ===
+--- green-c1l-new.run1.log: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1392 filtered out; finished in 5.00s
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... ok
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... ok
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok
+--- green-c1l-new.run2.log: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1392 filtered out; finished in 5.00s
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... ok
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... ok
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok
+--- green-c1l-new.run3.log: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1392 filtered out; finished in 5.00s
+test common::config::tests::per_caller_rate_limit_defaults_match_the_previous_literals ... ok
+test interfaces::middleware::rate_limit::tests::concurrent_burst_admits_exactly_one_request ... ok
+test interfaces::middleware::rate_limit::tests::rejected_requests_do_not_extend_the_window ... ok
+test interfaces::middleware::rate_limit::tests::retry_after_header_shrinks_as_the_window_elapses ... ok
+test interfaces::middleware::rate_limit::tests::two_routes_share_one_budget ... ok

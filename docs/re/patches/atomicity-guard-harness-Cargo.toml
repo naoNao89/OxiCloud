@@ -1,0 +1,29 @@
+[package]
+name = "burstcheck"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+# Exactly the repo's dependency spec (Cargo.toml: `moka = { version = "0.12.15",
+# features = ["future", "sync"] }`), resolved to the lockfile's 0.12.15.
+moka = { version = "=0.12.15", features = ["future", "sync"] }
+
+[[bin]]
+name = "burstcheck"
+path = "src/main.rs"
+
+# The three optimisation levels this experiment compares. `dev` is cargo's
+# default (opt-level 0) and is what the first run used; `opt1` mirrors the repo's
+# `[profile.dev] opt-level = 1` (which `profile.test` inherits, and cargo test
+# builds with the test profile); `opt3` mirrors the shipped release build
+# (`[profile.release] opt-level = 3`).
+[profile.dev]
+opt-level = 0
+
+[profile.opt1]
+inherits = "dev"
+opt-level = 1
+
+[profile.opt3]
+inherits = "dev"
+opt-level = 3

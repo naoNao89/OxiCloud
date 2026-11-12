@@ -1,0 +1,132 @@
+Build provenance for the differential (C0, C1L, C1P, C1, B)
+============================================================
+
+Host: rustdev (Debian 13, 4 vCPU, ~8 GiB), rustc/cargo 1.99.0. Every build:
+  cargo build --bin oxicloud      profile dev, default features, host gnu target,
+  CARGO_TARGET_DIR=<per-build>    CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+  CARGO_INCREMENTAL=0 RUSTFLAGS="-C debuginfo=0"
+  (-C target-cpu=native comes from the tree's .cargo/config.toml)
+A (released, musl/release/bundled-assets/x86-64-v2) is the baseline and is not
+rebuilt here: identity 9d364fdd…e080, see docs/re/identity.txt.
+
+Patch copies and their **added-lines checksums** (README recipe: sha256 over the
+**added non-comment lines only** — it ignores deletions, target paths and `#[…]`
+attributes, so it compares the code a patch *adds* and is NOT a whole-file hash
+and NOT an equivalence proof):
+  0001-limiter-window.patch         41f69043aaa5c2a150d11bea7a9a14ea8a573937e630268b99218906a449a10e  249 added lines (same slice)   (at run time: ba230d63…; delivered: 29dd53b9…)
+  0002-setup-budget.patch           a4a7304780dbfd23f100d4b0ed319eaacee0bb03c5c448ec9962e40bef3cd854  151 added lines (same slice)   (at run time: 9da0aa45…, generated against the 0001 in this row; delivered: 4744df0e…)
+  0003-trusted-proxy-rightmost.patch f81b333b7edb8a700664c154306ab309563b8a9450564f6182488b3d36ac6423  284 added lines (same slice)
+  0004-openapi-setup-errors.patch  8348585d92b955ab533181f9d2a85a3dac130c8e7e1503ca39f0ef0dd0e72444   57 added lines (same slice)
+  Use 0001 and 0002 from the same row (README: "Order and dependencies").
+  History of 0001, each superseded and none of them the build input of record now:
+    d4e00aa9...  as first delivered — does NOT compile (`Duration::div_ceil`, E0599 on rustc 1.99.0)
+    751ca5a0...  same production code, prose only — established by the TREE COMPARISON
+                 below, not by the checksum
+    27bac478...  first guard-test revision (guard doc comment since reconciled)
+  **Tree comparison (the actual equivalence evidence).** The non-test part of
+  `src/interfaces/middleware/rate_limit.rs` (everything before the `// ─── Tests ───`
+  banner, i.e. all production code in that file) hashes to
+  `db80b2cefdb4c40e971738fb58518afafe8ca551b2d899e502857767461b70bb` in
+  `HEAD+0001` and in every 0001-carrying arm tree (`arm-src/{c1,c1l,c1l-new}`);
+  `HEAD` clean and the 0001-less arm (`c1p`) hash to
+  `d7b1e3d8ff63538d3c0a62734448cf943868b4e5648e931800b88e357b75925c`. So the
+  production code the arms ran is byte-identical, and the added-lines checksum
+  above is only a convenience for reviewing what a patch adds.
+  **The arm snapshots are partial** (`arm-src/` copies only the files an arm diverges in), so a tree
+  diff against a path the snapshot does not contain reports a missing-file error that *reads as
+  "differs"* — the trap that produced a false alarm when these checks were first run. Compare only
+  the files a snapshot actually holds.
+  C1L's binary was built from a local one-line correction of d4e00aa9 (the stable
+  ceil-to-seconds expression). **That copy was never committed and is no longer on
+  disk, so its reference is not reproducible** — the correction itself is, and the
+  current 0001 is the row above. Nothing in the measured results depends on the
+  superseded revisions: the equivalence that matters is the tree hash above (identical
+  production source across the arm trees), and every later revision only changes prose
+  and the `cfg(test)`-only guard test.
+
+Every arm tree also carries src/interfaces/errors.rs from the delivered working tree
+(sha256 b3dd847c21a83cbf265633327b9ee929eea65f1cfe7103476448f83620a44e35): the
+cfg(test) byte-length oracle. It is part of NO patch file, is test-only, and does not
+affect any binary. Arm tree = patches listed below + that file.
+
+---------------------------------------------------------------------------
+== c0-head-unpatched ==
+tree        /data/oxi
+rev-parse   389e161bc6b94d720f50505e4e9c8219e56124d3
+git-diff-sha256  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target      /data/oxi-target
+rustc       rustc 1.99.0 (b940084d7 2026-09-28)
+cargo       cargo 1.99.0 (5f94df478 2026-08-27)
+command     cargo build --bin oxicloud
+env         CARGO_TARGET_DIR=/data/oxi-target CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 RUSTFLAGS=-C debuginfo=0  (profile dev, default features, host gnu; -C target-cpu=native from .cargo/config.toml)
+df-before   /dev/vdb         20G   16G  3.7G  82% /data
+cargo-exit  0
+binary      /data/re/bin/c0-head-unpatched
+sha256      12959e3dd464352d7be4f60fb4d6509ccc711a24eccb129d069e9cc298422b35
+size        117662288
+df-after    /dev/vdb         20G   19G  1.5G  93% /data
+---------------------------------------------------------------------------
+== c1l-limiter-only ==
+tree        /data/oxi
+rev-parse   389e161bc6b94d720f50505e4e9c8219e56124d3
+git-diff-sha256  12f33782a0bcbdea77481ce0a0ac093ff590ea5c1b13cdf60d407814ed617553
+target      /data/oxi-target
+rustc       rustc 1.99.0 (b940084d7 2026-09-28)
+cargo       cargo 1.99.0 (5f94df478 2026-08-27)
+command     cargo build --bin oxicloud
+env         CARGO_TARGET_DIR=/data/oxi-target CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 RUSTFLAGS=-C debuginfo=0  (profile dev, default features, host gnu; -C target-cpu=native from .cargo/config.toml)
+df-before   /dev/vdb         20G   18G  1.7G  92% /data
+cargo-exit  0
+binary      /data/re/bin/c1l-limiter-only
+sha256      5f3a5b9fc3d709ba54dd255397e25059ce7223abe8585f916be5dc450ef85083
+size        117743040
+df-after    /dev/vdb         20G   19G  1.3G  94% /data
+---------------------------------------------------------------------------
+== c1p-proxy-only ==
+tree        /data/oxi
+rev-parse   389e161bc6b94d720f50505e4e9c8219e56124d3
+git-diff-sha256  5fccb4a8ffec4025c42212cfccae711a1f0bb10e9958e06449cf8e2d7b99beaf
+target      /data/oxi-target
+rustc       rustc 1.99.0 (b940084d7 2026-09-28)
+cargo       cargo 1.99.0 (5f94df478 2026-08-27)
+command     cargo build --bin oxicloud
+env         CARGO_TARGET_DIR=/data/oxi-target CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 RUSTFLAGS=-C debuginfo=0  (profile dev, default features, host gnu; -C target-cpu=native from .cargo/config.toml)
+df-before   /dev/vdb         20G   19G  928M  96% /data
+cargo-exit  0
+binary      /data/re/bin/c1p-proxy-only
+sha256      1695ac61548988b49cc3638161bced8f373334b44e60e60b915f0f71cf1f03cb
+size        117627856
+df-after    /dev/vdb         20G   19G  551M  98% /data
+---------------------------------------------------------------------------
+== c1-patched ==
+tree        /data/oxi
+rev-parse   389e161bc6b94d720f50505e4e9c8219e56124d3
+git-diff-sha256  f6d9897b43fb103c7f29e2ff688a81c8ac32ab0ca3da9d25605fb14b9cec8a31
+target      /data/oxi-target
+rustc       rustc 1.99.0 (b940084d7 2026-09-28)
+cargo       cargo 1.99.0 (5f94df478 2026-08-27)
+command     cargo build --bin oxicloud
+env         CARGO_TARGET_DIR=/data/oxi-target CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 RUSTFLAGS=-C debuginfo=0  (profile dev, default features, host gnu; -C target-cpu=native from .cargo/config.toml)
+df-before   /dev/vdb         20G   19G  551M  98% /data
+cargo-exit  0
+binary      /data/re/bin/c1-patched
+sha256      4666faa8759d208bd8ebd002fbe2574c201b309f416c666a72e4311738d20ec3
+size        117701088
+df-after    /dev/vdb         20G   20G  437M  98% /data
+---------------------------------------------------------------------------
+== b-v010-source ==
+tree        /data/oxi-v010
+rev-parse   496d25b89f672ffe3395042a0584f24d490ed761
+git-diff-sha256  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target      /data/oxi-target-v010
+rustc       rustc 1.99.0 (b940084d7 2026-09-28)
+cargo       cargo 1.99.0 (5f94df478 2026-08-27)
+command     cargo build --bin oxicloud
+env         CARGO_TARGET_DIR=/data/oxi-target-v010 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 RUSTFLAGS=-C debuginfo=0  (profile dev, default features, host gnu; -C target-cpu=native from .cargo/config.toml)
+df-before   /dev/vdb         20G   17G  3.2G  85% /data
+cargo-exit  0
+binary      /data/re/bin/b-v010-source
+sha256      0f47d7a4ed986c2c2cb382b8866e8da4d92b66bbfac9615ab3feaf9a3a179ea5
+size        114684664
+df-after    /dev/vdb         20G   19G  937M  96% /data
+---------------------------------------------------------------------------

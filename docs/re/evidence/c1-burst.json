@@ -1,0 +1,60 @@
+{
+ "label": "c1",
+ "n": 64,
+ "binary": "/data/re/bin/c1-patched",
+ "binary_sha256": "4666faa8759d208bd8ebd002fbe2574c201b309f416c666a72e4311738d20ec3",
+ "posture": {
+  "OXICLOUD_RATE_LIMIT_REGISTER_MAX": "1",
+  "OXICLOUD_RATE_LIMIT_REGISTER_WINDOW_SECS": "15"
+ },
+ "trials": [
+  {
+   "trial": 1,
+   "n": 64,
+   "served_400": 1,
+   "rejected_429": 63,
+   "other": 0,
+   "multiset": "1x400 63x429",
+   "secs": 0.389
+  },
+  {
+   "trial": 2,
+   "n": 64,
+   "served_400": 1,
+   "rejected_429": 63,
+   "other": 0,
+   "multiset": "1x400 63x429",
+   "secs": 0.385
+  },
+  {
+   "trial": 3,
+   "n": 64,
+   "served_400": 1,
+   "rejected_429": 63,
+   "other": 0,
+   "multiset": "1x400 63x429",
+   "secs": 0.39
+  },
+  {
+   "trial": 4,
+   "n": 64,
+   "served_400": 1,
+   "rejected_429": 63,
+   "other": 0,
+   "multiset": "1x400 63x429",
+   "secs": 0.388
+  },
+  {
+   "trial": 5,
+   "n": 64,
+   "served_400": 1,
+   "rejected_429": 63,
+   "other": 0,
+   "multiset": "1x400 63x429",
+   "secs": 0.396
+  }
+ ],
+ "overshoot_trials": 0,
+ "trials_total": 5,
+ "max_served": 1
+}

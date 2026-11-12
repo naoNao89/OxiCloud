@@ -1,0 +1,36 @@
+# Frontend error-shape tests — RED and GREEN legs (closes audit N-6)
+
+Purpose: the bundle claimed a RED→GREEN for the three frontend throw-shape tests without committing a run.
+Both legs below were executed in this checkout; the working tree was restored bit-identically afterwards.
+
+## GREEN (the shipped fix)
+
+```
+cd frontend && npx vitest run src/lib/api/endpoints/auth.test.ts
+
+ Test Files  1 passed (1)
+      Tests  27 passed (27)
+   Start at  00:33:25   Duration  1.16s
+```
+
+## RED (the pre-fix file, i.e. HEAD's version)
+
+`auth.ts` is uncommitted work, so HEAD's copy *is* the pre-fix file:
+
+```
+md5 src/lib/api/endpoints/auth.ts                                   # 08ab4a32eaf3b5655578dcdd08e250ad  (fixed)
+git show HEAD:frontend/src/lib/api/endpoints/auth.ts > frontend/src/lib/api/endpoints/auth.ts
+cd frontend && npx vitest run src/lib/api/endpoints/auth.test.ts
+
+ × setupAdmin handles the body-only throw shape (Hey API default responseStyle)        4ms
+ × setupAdmin renders the text/plain body instead of "setup failed: unknown"           1ms
+ × a bare-string throw through apiErrorFromSdkError is not a NetworkError              1ms
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 24 passed (27)
+```
+
+Restoration check: `md5` after copying the fixed file back = `08ab4a32eaf3b5655578dcdd08e250ad` — identical to the
+pre-run value. Without the fix the three tests that pin the throw shapes fail; with it they pass, and the other 24
+keep passing. The exact `ApiError` message assertions and the "never `undefined`/`unknown`" invariants live in
+`frontend/src/lib/api/endpoints/auth.test.ts` (~:823-847 and ~:897-909).
