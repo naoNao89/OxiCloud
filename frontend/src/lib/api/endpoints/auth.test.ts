@@ -820,6 +820,34 @@ describe('register surfaces the server error shape, never "undefined"', () => {
 		await expect(auth.setupAdmin('e@x.test', 'p')).rejects.toThrow(/^setup failed: 500$/);
 	});
 
+	it('setupAdmin handles the body-only throw shape (Hey API default responseStyle)', async () => {
+		// Regression: the generated `setupAdmin` is emitted with
+		// `responseStyle: 'data'` (sdk.gen.ts:3040) and the wrapper adds
+		// only `throwOnError: true`, so the Hey API client throws the
+		// parsed body DIRECTLY (`client/client.gen.ts:198`) — no
+		// `{response, data}` envelope and no Response object. A catch
+		// that reads only `err.data` therefore misses the body, and the
+		// setup wizard renders the literal "setup failed: unknown" the
+		// manual sandbox checklist watches for (Row 7: "a 400/409 shows
+		// a clean error message, not undefined").
+		sdkSetupAdmin.mockRejectedValueOnce({
+			status: '400 Bad Request',
+			error: 'Password must be at least 8 characters long',
+			message: 'Password must be at least 8 characters long',
+			error_type: 'InvalidInput'
+		});
+		try {
+			await auth.setupAdmin('admin@x.test', 'short');
+			throw new Error('expected setupAdmin to throw');
+		} catch (e) {
+			const msg = (e as Error).message;
+			expect(msg).toBe('Password must be at least 8 characters long');
+			// Load-bearing invariant, same as the register cases above.
+			expect(msg).not.toContain('undefined');
+			expect(msg).not.toContain('unknown');
+		}
+	});
+
 	// The generated client throws the parsed body (no `response`), which is
 	// why the old `e.response.status === 503` check never matched: a server
 	// without SMTP turned into "Something went wrong. Try again." instead of
@@ -844,5 +872,62 @@ describe('register surfaces the server error shape, never "undefined"', () => {
 			status: 500,
 			message: 'mailer exploded'
 		});
+	});
+});
+
+// ── Bare-string throws (text/plain extractor rejections) ────────────
+//
+// Axum's JSON extractor answers with a text/plain body, not a JSON
+// `ErrorResponse`: `JsonSyntaxError` (400), `JsonDataError` (422),
+// `MissingJsonContentType` (415). The generated client throws
+// `jsonError ?? textError` (`client/client.gen.ts:196-210`), so on those
+// the throw IS the raw body STRING — no `{response, data}` envelope, no
+// parsed object to read `.message`/`.error` off.
+//
+// This is reachable in production on `POST /api/setup`: an operator whose
+// request misses a required field gets a 400 whose body is the plain
+// extractor sentence. A normaliser that only read object fields lost it —
+// the setup wizard rendered the literal "setup failed: unknown", and the
+// `ApiError` path reported `status: 0` + `NetworkError`, i.e. a server
+// 4xx mislabelled as "the server is unreachable".
+describe('bare-string throws keep the text/plain body', () => {
+	const TEXT_PLAIN_BODY =
+		'Failed to deserialize the JSON body into the target type: missing field `email` at line 1 column 30';
+
+	it('setupAdmin renders the text/plain body instead of "setup failed: unknown"', async () => {
+		// The regression the setup wizard showed: the throw is the body
+		// string, so `.message`/`.error` are both undefined on it and the
+		// catch fell through to `setup failed: ${status ?? 'unknown'}`.
+		sdkSetupAdmin.mockRejectedValueOnce(TEXT_PLAIN_BODY);
+		try {
+			await auth.setupAdmin('admin@x.test', 'p');
+			throw new Error('expected setupAdmin to throw');
+		} catch (e) {
+			const msg = (e as Error).message;
+			expect(msg).toBe(TEXT_PLAIN_BODY);
+			// Load-bearing invariant, same as the object-shape cases above.
+			expect(msg).not.toContain('unknown');
+			expect(msg).not.toContain('undefined');
+		}
+	});
+
+	it('a bare-string throw through apiErrorFromSdkError is not a NetworkError', async () => {
+		// `register` maps the SDK throw through `apiErrorFromSdkError`,
+		// which recovered no status off a string body and therefore landed
+		// on `status: 0` + `errorType: 'NetworkError'` — a reachable
+		// server's 4xx reported as a connectivity failure, with the
+		// operator's own sentence discarded. NetworkError stays reserved
+		// for a throw that carries no HTTP body at all (the `{}` case
+		// pinned above).
+		sdkRegister.mockRejectedValueOnce(TEXT_PLAIN_BODY);
+		try {
+			await auth.register('x@y.z', 'p');
+			throw new Error('expected register to throw');
+		} catch (e) {
+			const err = e as { name?: string; errorType?: string; message?: string };
+			expect(err.name).toBe('ApiError');
+			expect(err.message).toBe(TEXT_PLAIN_BODY);
+			expect(err.errorType).not.toBe('NetworkError');
+		}
 	});
 });

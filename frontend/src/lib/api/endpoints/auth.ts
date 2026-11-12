@@ -27,56 +27,97 @@ import type { AuthResponse, SelfUser } from '$lib/api/types';
 // `oxi:server-status`, `oxi:message-bus`, `oxi:config`.
 const authLog = log.getLogger('oxi:auth');
 
+/** The backend's `ErrorResponseDto`, as parsed by the Hey API client. */
+interface SdkErrorBody {
+	error_type?: unknown;
+	message?: unknown;
+	error?: unknown;
+	status?: unknown;
+}
+
 /**
- * Map an SDK-thrown error (`throwOnError: true`) into the same `ApiError`
- * shape the hand-written wrappers produced from `apiFetch` + `parseErrorBody`.
+ * Normalise a `throwOnError: true` rejection into the parsed error body, an
+ * accurate HTTP status when one is recoverable, and the envelope's statusText.
  *
- * Hey API's thrown object carries `response` (the raw Fetch Response — status,
- * statusText) alongside `data`, which is the ALREADY-PARSED error body — no
- * second JSON parse is needed, unlike the apiFetch path. See `transport.ts`
- * for the matching contract: both paths share the same `ErrorResponseDto`
- * shape on non-2xx.
+ * Hey API throws two different shapes depending on the SDK call's
+ * `responseStyle` — the generated `client/client.gen.ts:189-198` throws the
+ * parsed body itself, never a wrapper:
+ *   * `responseStyle: 'fields'` → throws a `{response, data}` envelope: `data`
+ *     is the parsed body, `response` is the raw Response. `fetchMe` +
+ *     `tryRefresh` opt into this because they need the Response to read status
+ *     without parsing the body.
+ *   * `responseStyle: 'data'` (the generated default every other call
+ *     inherits) → throws the parsed body DIRECTLY. No wrapper, no Response
+ *     object, so `status` comes from the numeric prefix of the body's own
+ *     `status` string.
+ *
+ * Every caller needs the same two-shape read: a regression that only handled
+ * one shape is what shipped on 9ce1418b (`register` showed "API 0 for
+ * /api/auth/register" instead of the server message).
+ *
+ * A THIRD shape exists and is reachable in production: `client.gen.ts:196-210`
+ * throws `jsonError ?? textError`, so when the error body is not JSON the
+ * throw is the raw response TEXT as a plain string. Axum's JSON extractor
+ * rejections are exactly that (`JsonSyntaxError` 400, `JsonDataError` 422,
+ * `MissingJsonContentType` 415 — all text/plain), so the string path below
+ * carries a real server message that no object read would ever find. It is
+ * carried out as `text`; no status is recoverable from a bare string, so
+ * `status` stays undefined and callers must NOT read that as a transport
+ * failure (see `apiErrorFromSdkError`).
  */
-function apiErrorFromSdkError(e: unknown, path: string): ApiError {
-	// Hey API throws two different shapes depending on the SDK call's
-	// `responseStyle`:
-	//   * `responseStyle: 'fields'` → throws a `{response, data}`
-	//     envelope: `data` is the parsed body, `response` is the raw
-	//     Response. `fetchMe` + `tryRefresh` opt into this because they
-	//     need the Response to read status without parsing the body.
-	//   * default (`responseStyle: 'data'`, every other call) → throws
-	//     the parsed body DIRECTLY. No wrapper, no Response object.
-	//     Register, login, upgrade, etc. all land here.
-	//
-	// This helper accepts BOTH shapes so every caller can use it
-	// without having to flip `responseStyle` just to get the error
-	// extraction right. A regression that only works for one shape
-	// (which is what shipped on 9ce1418b: register showed
-	// "API 0 for /api/auth/register" instead of the server message)
-	// is what the branch here guards against.
+function readSdkError(e: unknown): {
+	body: SdkErrorBody;
+	status?: number;
+	statusText: string;
+	/** The raw text body when the client threw a bare string — the
+	 *  text/plain / non-JSON case. `undefined` for the object shapes. */
+	text?: string;
+} {
+	if (typeof e === 'string') {
+		return { body: {}, status: undefined, statusText: '', text: e };
+	}
 	const envelope = e as { response?: Response; data?: unknown };
 	const bodyFromEnvelope = envelope.response !== undefined ? envelope.data : undefined;
 	// When the throw IS the body, read fields off `e` directly.
 	// When it's the envelope, `.data` is the body.
-	const body = (bodyFromEnvelope ?? e ?? {}) as {
-		error_type?: unknown;
-		message?: unknown;
-		error?: unknown;
-		status?: unknown;
+	const body = (bodyFromEnvelope ?? e ?? {}) as SdkErrorBody;
+	return {
+		body,
+		status: envelope.response?.status ?? parseStatusFromBody(body.status),
+		statusText: envelope.response?.statusText ?? ''
 	};
-	const status = envelope.response?.status ?? parseStatusFromBody(body.status) ?? 0;
-	const statusText = envelope.response?.statusText ?? '';
+}
+
+/**
+ * Map an SDK-thrown error (`throwOnError: true`) into the same `ApiError`
+ * shape the hand-written wrappers produced from `apiFetch` + `parseErrorBody`.
+ *
+ * The thrown object already carries the PARSED error body — no second JSON
+ * parse is needed, unlike the apiFetch path; `readSdkError` absorbs the two
+ * shapes the client can throw it in. See `transport.ts` for the matching
+ * contract: both paths share the same `ErrorResponseDto` shape on non-2xx.
+ */
+function apiErrorFromSdkError(e: unknown, path: string): ApiError {
+	const { body, status: recoveredStatus, statusText, text } = readSdkError(e);
+	// No recoverable status ⇒ the throw carried no HTTP status. A bare-string
+	// throw still carries a SERVER body, so this is not by itself a transport
+	// failure — only a throw with no body at all is (see `errorType` below).
+	const status = recoveredStatus ?? 0;
 	// Only a throw with no HTTP body is a transport failure (server down,
-	// DNS, reset). A body carrying `error_type` always came from the server.
+	// DNS, reset). A body carrying `error_type` always came from the server —
+	// and so does a bare text body (a text/plain extractor rejection is a
+	// server 4xx, reporting it as `NetworkError` told the user their
+	// connection was broken while the server was answering).
 	const errorType =
 		typeof body.error_type === 'string'
 			? body.error_type
-			: status === 0
+			: status === 0 && text === undefined
 				? 'NetworkError'
 				: undefined;
 	const message =
 		(typeof body.message === 'string' ? body.message : undefined) ??
-		(typeof body.error === 'string' ? body.error : undefined);
+		(typeof body.error === 'string' ? body.error : undefined) ??
+		(typeof text === 'string' && text.length > 0 ? text : undefined);
 	return new ApiError(status, statusText, path, errorType, message);
 }
 
@@ -386,12 +427,16 @@ export async function setupAdmin(email: string, password: string): Promise<void>
 			throwOnError: true
 		});
 	} catch (e) {
-		const err = e as { response?: { status?: number }; data?: unknown };
-		const body = (err.data ?? {}) as { error?: unknown; message?: unknown };
+		const { body, status, text } = readSdkError(e);
+		// `text` covers the text/plain extractor rejections this endpoint can
+		// return (a 400 whose body is `Failed to deserialize the JSON body
+		// into the target type: ...`). Without it the wizard rendered
+		// "setup failed: unknown" for a server message it actually had.
 		const msg =
 			(typeof body.message === 'string' && body.message) ||
 			(typeof body.error === 'string' && body.error) ||
-			`setup failed: ${err.response?.status ?? 'unknown'}`;
+			(typeof text === 'string' && text.length > 0 && text) ||
+			`setup failed: ${status ?? 'unknown'}`;
 		throw new Error(msg, { cause: e });
 	}
 }
