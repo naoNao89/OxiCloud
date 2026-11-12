@@ -89,7 +89,14 @@ env:
   # feature HEAD would execute whatever that branch's tip had become, so "this SHA
   # was verified by that harness" would stop being reproducible. Bump only in a
   # commit that says so, and re-run every branch afterwards.
-  RE_HARNESS_REF: 7f9c2014031d643262946f557ebdab198a92dded
+  #
+  # a31dda44 (2026-11-13): the corpus baseline could not run at all on a fresh
+  # service container — re_template_ensure booted the template through re_boot,
+  # which assigns the globals RE_PORT/RE_DB, so the caller then reset "re_tpl"
+  # against itself. The change is confined to that leak (+ a clearer failure
+  # message and one docstring); every arm the differential was measured from is
+  # unaffected, because the sandbox's persistent container never took that path.
+  RE_HARNESS_REF: a31dda44110c117879e111442c040203eb1354af
   # Every delivery branch is cut from this commit (C0, the fork's `main`).
   RE_BASE: 389e161bc6b94d720f50505e4e9c8219e56124d3
 
@@ -271,14 +278,14 @@ jobs:
           fi
           echo "HARNESS_MODE=$HARNESS_MODE" >> "$GITHUB_ENV"
           echo "HARNESS_SHA=$HARNESS_SHA" >> "$GITHUB_ENV"
-          # provenance.txt was written before the harness resolved, so record the
-          # resolved revision in the artifact as well: the pin's whole point is
-          # that "which harness ran this" is answerable from the evidence, and
-          # without this line it is answerable only from the step log.
-          {
-            echo "harness sha       $HARNESS_SHA"
-            echo "harness mode      $HARNESS_MODE"
-          } >> "$ART/provenance.txt"
+          # provenance.txt was written before the harness resolved, so replace the
+          # placeholder pair IN PLACE. Appending left a stale `harness sha
+          # unknown` above the real one, and every first-match reader -- including
+          # the artifact verification script -- then took the stale value.
+          sed -i -E \
+            -e "s|^harness sha .*|harness sha       $HARNESS_SHA|" \
+            -e "s|^harness mode .*|harness mode      $HARNESS_MODE|" \
+            "$ART/provenance.txt"
           test -f docs/re/scripts/lib-re.sh
           test -f docs/re/evidence/A.jsonl
           test -f docs/re/evidence/differential.json
@@ -740,10 +747,17 @@ jobs:
           echo "OK — the branch carries ${{ matrix.marker }}"
 
       - name: Materialise the RE harness and check the committed differential
-        if: matrix.branch == github.ref_name && matrix.kind == 'guards'
+        if: matrix.branch == github.ref_name
         run: |
           set -euo pipefail
-          if [ -f docs/re/scripts/lib-re.sh ] && [ -f docs/re/evidence/differential.json ]; then
+          # Only the guards leg reads docs/re/scripts; the openapi, frontend and
+          # unit legs compile the branch's own spec/frontend/tests. They must SAY
+          # that in the artifact rather than inherit the pre-resolution
+          # placeholder, which read "unknown" and meant nothing.
+          if [ "${{ matrix.kind }}" != "guards" ]; then
+            HARNESS_MODE="not-used"; HARNESS_SHA="-"
+            echo "harness: not used by the ${{ matrix.kind }} leg (it reads no docs/re/scripts)"
+          elif [ -f docs/re/scripts/lib-re.sh ] && [ -f docs/re/evidence/differential.json ]; then
             HARNESS_MODE="in-tree"; HARNESS_SHA="$GITHUB_SHA"
             echo "harness: in-tree copy at $HARNESS_SHA (this ref owns docs/re)"
           else
@@ -758,17 +772,19 @@ jobs:
           fi
           echo "HARNESS_MODE=$HARNESS_MODE" >> "$GITHUB_ENV"
           echo "HARNESS_SHA=$HARNESS_SHA" >> "$GITHUB_ENV"
-          # provenance.txt was written before the harness resolved, so record the
-          # resolved revision in the artifact as well: the pin's whole point is
-          # that "which harness ran this" is answerable from the evidence, and
-          # without this line it is answerable only from the step log.
-          {
-            echo "harness sha       $HARNESS_SHA"
-            echo "harness mode      $HARNESS_MODE"
-          } >> "$ART/provenance.txt"
-          test -f docs/re/scripts/lib-re.sh
-          test -f docs/re/evidence/A.jsonl
-          test -f docs/re/evidence/differential.json
+          # Replace the placeholder pair IN PLACE: appending left a stale
+          # `harness sha unknown` above the resolved one, and every first-match
+          # reader -- including the artifact verification script -- took the stale
+          # value.
+          sed -i -E \
+            -e "s|^harness sha .*|harness sha       $HARNESS_SHA|" \
+            -e "s|^harness mode .*|harness mode      $HARNESS_MODE|" \
+            "$ART/provenance.txt"
+          if [ "${{ matrix.kind }}" = "guards" ]; then
+            test -f docs/re/scripts/lib-re.sh
+            test -f docs/re/evidence/A.jsonl
+            test -f docs/re/evidence/differential.json
+          fi
 
       # ── 0004: the spec artifact and the test that guards it ───────────────
       - name: Toolchain (Rust)
