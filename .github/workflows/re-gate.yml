@@ -318,19 +318,29 @@ jobs:
           set -euo pipefail
           mkdir -p "$CI_ROOT/bin"
           cd "$CI_ROOT/bin"
-          curl -fsSL -o release.tar.gz "$RE_RELEASE_BASE/oxicloud-0.10.0-x86_64-unknown-linux-musl.tar.gz"
+          # Download to the asset's OWN filename: `sums.txt` carries the name from
+          # the release's SHA256SUMS, and `sha256sum -c` looks that name up on disk.
+          # (The first real run of this gate failed here — it had downloaded the
+          # bytes as `release.tar.gz` while the manifest named the asset, so `-c`
+          # reported "No such file or directory" and the behaviour leg never
+          # reached the corpus. Reading the log is what found it; nothing about it
+          # was branch-specific.)
+          A_TARBALL=oxicloud-0.10.0-x86_64-unknown-linux-musl.tar.gz
+          curl -fsSL -o "$A_TARBALL" "$RE_RELEASE_BASE/$A_TARBALL"
           curl -fsSL -o SHA256SUMS "$RE_RELEASE_BASE/SHA256SUMS"
-          grep -F 'oxicloud-0.10.0-x86_64-unknown-linux-musl.tar.gz' SHA256SUMS > sums.txt
+          grep -F "$A_TARBALL" SHA256SUMS > sums.txt
           [ "$(wc -l < sums.txt)" = "1" ] || { echo "::error::SHA256SUMS does not pin the x86_64-linux-musl asset exactly once"; exit 1; }
+          # Two independent identities: the release's own manifest, then the
+          # sha256 pinned in docs/re/identity.txt §1.
           sha256sum -c --quiet sums.txt
-          echo "$EXPECTED_TARBALL_SHA256  release.tar.gz" | sha256sum -c --quiet -
-          tar xzf release.tar.gz
+          echo "$EXPECTED_TARBALL_SHA256  $A_TARBALL" | sha256sum -c --quiet -
+          tar xzf "$A_TARBALL"
           A=oxicloud-0.10.0-x86_64-unknown-linux-musl/oxicloud
           echo "$EXPECTED_BINARY_SHA256  $A" | sha256sum -c --quiet -
           "$PWD/$A" --version
           {
             echo "A (released v0.10.0, x86_64-unknown-linux-musl)"
-            echo "  tarball sha256   $(sha256sum release.tar.gz | cut -d' ' -f1)"
+            echo "  tarball sha256   $(sha256sum "$A_TARBALL" | cut -d' ' -f1)"
             echo "  binary  sha256   $(sha256sum "$A" | cut -d' ' -f1)"
             echo "  expected sha256  $EXPECTED_BINARY_SHA256"
             echo "  path             $PWD/$A"
