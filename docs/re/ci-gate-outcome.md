@@ -1,6 +1,6 @@
 # CI gate outcome — blocked on the fork; what the sandbox verified instead
 
-## The blocker (measured, not inferred)
+## The blocker (confirmed by GitHub, not inferred)
 
 - **18 runs exist on `naoNao89/OxiCloud`; every single one is `completed/failure`, and no job has ever executed a
   step.** `gh api …/actions/runs/<id>/jobs` returns `steps: 0` for each job, with
@@ -13,9 +13,24 @@
 - `GET /repos/naoNao89/OxiCloud/actions/permissions` → `{"enabled":true,"allowed_actions":"all"}`; the repository is
   public; `runs-on: ubuntu-latest` is a valid label; `actionlint` 1.7.12 reports **no findings** on
   `re-gate.yml` or `ci.yml`.
-- Conclusion: GitHub creates the run and the jobs, then fails every job **at runner assignment**. The workflow files
-  are not the cause. To unblock, the account/repository side has to be checked (Actions/billing state, a flagged
-  account, whether GitHub-hosted runners are permitted for this account).
+- **The reason, in GitHub's own words.** Each job's check run carries a failure annotation, read from
+  `gh api <job.check_run_url>/annotations`:
+  ```json
+  {"annotation_level":"failure",
+   "message":"The job was not started because your account is locked due to a billing issue."}
+  ```
+  The same message is the only failure annotation on **every** failing job checked — the smoke job
+  (check run 131461286817), the `CI` run 43296304317, the `RE gate` run 43296304348, and the frontend branch's
+  run 43298315578. (The run-level `…/actions/runs/<id>/annotations` endpoint returns 404 and is *not* the
+  instrument; the annotation hangs off the **check run**, whose URL is the job's `check_run_url` field.)
+- Conclusion: hosted execution is blocked by an **account billing lock** on the account owning
+  `naoNao89/OxiCloud`. Nothing ran, so this evidence neither implicates nor clears the workflow files at runtime;
+  their validity rests on the offline instruments only — `actionlint` 1.7.12 (no findings), `bash -n` on every
+  `run:` block, and the fact that the non-vacuous guards were **executed locally** (below). Unblocking is
+  a billing matter on the account, outside this repository.
+- Incidental, from the same annotation payload: GitHub also attaches a `notice` that the `ubuntu-latest` label
+  migrates to Ubuntu 26 from 2026-10-19 ([runner-images#14748](https://github.com/actions/runner-images/issues/14748)) —
+  which is already in the past relative to this record, so the runners' image is moving underneath any future run.
 
 ## What each phase therefore is
 
