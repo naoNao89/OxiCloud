@@ -209,9 +209,10 @@ pub async fn create_grant(
             // caller is authenticated and rate-limit visibility leaks
             // nothing they don't already know about their own
             // behaviour.
+            let rate_key = caller_id.to_string();
             if state
                 .email_invite_rate_limiter
-                .check_and_increment(&caller_id.to_string())
+                .check_and_increment(&rate_key)
                 .is_err()
             {
                 tracing::warn!(
@@ -222,7 +223,10 @@ pub async fn create_grant(
                     "Per-sharer email-invite rate limit exceeded"
                 );
                 return crate::interfaces::middleware::rate_limit::too_many_requests(
-                    state.email_invite_rate_limiter.retry_after(),
+                    // This caller's remaining window, not the configured hour:
+                    // the value becomes both the body field and `Retry-After`,
+                    // and it must not overstate the wait.
+                    state.email_invite_rate_limiter.retry_after_for(&rate_key),
                 );
             }
             // PR C: pass the inviter id so resolve_or_create_recipient
