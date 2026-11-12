@@ -112,8 +112,10 @@ env:
   #    container. Trust auth on a loopback-only throwaway container: there is no
   #    credential value anywhere, and the DSN in run-<label>/env.sh keeps the
   #    harness's literal `RE_PGPASS` placeholder.
+  # RE_PG_PORT is deliberately NOT set here: the postgres service's host port is
+  # assigned by the runner and exported from job.services in the behaviour job's
+  # first step. A fixed 55432 collided with an outside occupant twice in ~40 jobs.
   RE_PG_HOST: 127.0.0.1
-  RE_PG_PORT: "55432"
   RE_PG_USER: re_user
   RE_PG_PASS: RE_pgpass_x9
   # The harness reads its Postgres statement log from inside the container. A
@@ -183,7 +185,12 @@ jobs:
           # none can leak into an artifact.
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
-          - 55432:5432
+          # Dynamic host port, NOT 55432: a fixed mapping collided with an
+          # outside occupant of that port on two different runner VMs (twice in
+          # ~40 jobs), and `docker start` failing to bind kills the whole leg
+          # before a single step runs ("address already in use" at Initialize
+          # containers). RE_PG_PORT is exported from job.services below.
+          - "5432"
         options: >-
           --health-cmd "pg_isready -U re_user"
           --health-interval 10s
@@ -235,6 +242,12 @@ jobs:
             echo "runner            ${{ runner.os }} ${{ runner.arch }} (${{ runner.name }})"
           } > "$ART/provenance.txt"
           cat "$ART/provenance.txt"
+          # The postgres container's host port is assigned by the runner (see
+          # services.postgres.ports); the harness builds the app's DSN from it.
+          # GITHUB_ENV wins over any workflow-level default, and this step is the
+          # first one the matching leg runs, so every later step sees it.
+          echo "RE_PG_PORT=${{ job.services.postgres.ports['5432'] }}" >> "$GITHUB_ENV"
+          echo "postgres host port: ${{ job.services.postgres.ports['5432'] }}"
 
       - name: The push must carry this branch's patch (or the gate is vacuous)
         if: matrix.branch == github.ref_name
