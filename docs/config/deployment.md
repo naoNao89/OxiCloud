@@ -280,6 +280,13 @@ OXICLOUD_BASE_URL=https://cloud.example.com
 # networks like traefik-net are carved from it). If you pinned a
 # narrower subnet with `--subnet=` on `docker network create`, use
 # that instead — tighter is better.
+#
+# With this set, the effective client IP is the RIGHTMOST
+# X-Forwarded-For entry that is not itself inside one of these CIDRs
+# (falling back to X-Real-Ip, then to the peer). Your proxy must APPEND
+# (`$proxy_add_x_forwarded_for`, Traefik's default), not replace: the
+# appended hop is the one the server can believe, and anything a client
+# prepends is ignored.
 OXICLOUD_TRUST_PROXY_CIDR=172.16.0.0/12
 ```
 
