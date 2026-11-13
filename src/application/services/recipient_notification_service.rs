@@ -384,7 +384,9 @@ impl RecipientNotificationService {
         {
             self.audit_skipped(granter, recipient, resource, trigger, "rate_limited");
             return NotifyOutcome::RateLimited {
-                retry_after_secs: self.per_email_limiter.retry_after() as u32,
+                // The recipient's own remaining window, not the configured
+                // window: callers surface this as `retry_after_secs`.
+                retry_after_secs: self.per_email_limiter.retry_after_for(recipient.email()) as u32,
             };
         }
 
