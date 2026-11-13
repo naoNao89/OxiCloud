@@ -7,6 +7,14 @@ on:
         - dev
         - "feat/**"
         - "fix/**"
+        # `re-gate.yml` also delivers `docs/setup-openapi`, `docs/behavioral-re`
+        # and `test/error-byte-oracle`. This list is an allow-list, so without
+        # these two globs a push to any of them starts NO workflow at all and the
+        # branch never gets a status check (re-gate triggers on its own names, but
+        # this file would still be blind to them). The `changes` paths-filter
+        # below keeps every heavy job off a docs-only or test-only diff.
+        - "docs/**"
+        - "test/**"
   pull_request:
     branches: [ "main", "dev" ]
 
