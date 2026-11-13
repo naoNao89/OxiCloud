@@ -195,7 +195,10 @@ fn section_client_ip() {
     }
     // Directly exercise every ClientIpDisplay variant's Display.
     assert_eq!(
-        format!("{}", ClientIpDisplay::ForwardedIp("1.2.3.4".parse().unwrap())),
+        format!(
+            "{}",
+            ClientIpDisplay::ForwardedIp("1.2.3.4".parse().unwrap())
+        ),
         "1.2.3.4"
     );
     assert_eq!(
