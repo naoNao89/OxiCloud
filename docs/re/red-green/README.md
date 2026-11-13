@@ -28,7 +28,7 @@ green" from "this test never ran", and that is the difference this gate exists t
 
 | `kind` | leg command | the frozen comparison |
 |---|---|---|
-| `rust` | `cargo test --lib -- <filter>` | the whole `#[cfg(test)]`-to-EOF region of `test_path` |
+| `rust` | `cargo test --lib -- <filter>` | the whole file at `test_path` (repo-relative) |
 | `integration` | `cargo test --test <test_target> -- <filter>`, against the job's postgres service | the whole file at `test_path` (repo-relative) |
 | `frontend` | `npx vitest run <test_path>` from `frontend/` | the whole file at `frontend/<test_path>` |
 
@@ -57,13 +57,35 @@ of the assertion (e.g. `must declare 400` for an assertion whose full text is
    - **frontend** — a separate file (`frontend/src/lib/api/endpoints/auth.test.ts`): whole-file byte-identity,
      on a path normalised to the repo root (the manifest is frontend-relative; an unnormalised
      `git diff --quiet src/lib/…` matches nothing at the repo root and exits 0 *vacuously* — that bug is fixed);
-   - **rust** — the test module is inline in the same file the fix changes, so the unit of comparison is the
-     whole region from the first `#[cfg(test)]` to EOF, and it must be byte-identical. That is what "the test
-     was not weakened" means, and it is strictly stronger than checking that the lines the test commit added
-     are still present somewhere: byte-identity also rejects an added `#[ignore]`, a new `#[cfg]` gate, an
-     early return, or a reworded assertion, all of which leave the original lines in place;
-   - in both cases the manifest's `filter` must name something inside the compared region, so a filter that
-     matches nothing cannot masquerade as a frozen test;
+   - **rust** — the regression module lives in its own file beside the fix
+     (`src/interfaces/middleware/rate_limit/tests.rs`), declared from the parent as
+     `#[cfg(test)] #[rustfmt::skip] mod tests;`, so the comparison is the **whole file**, exactly as for the
+     other two kinds — no region extraction, nothing inferred from content. That is what "the test was not
+     weakened" means, and it is strictly stronger than checking that the lines the test commit added are still
+     present somewhere: byte-identity also rejects an added `#[ignore]`, a new `#[cfg]` gate, an early return,
+     or a reworded assertion, all of which leave the original lines in place. The `#[rustfmt::skip]` is the
+     price of keeping the moved body byte-identical: rustfmt reprints an out-of-line module as a crate root and
+     would otherwise demand the body be outdented to column 0, so rustfmt no longer reformats those three
+     files;
+   - **the frozen file must be the file that fails.** Byte-identity alone is not enough: `test_path` could name
+     a decoy (a comment-only file) while the real assertion lived elsewhere and the fix rewrote it. Two checks
+     close that, and both were added after an independent auditor **executed** the decoy: the declaration
+     pattern is line-anchored (`^[[:space:]]*(…)?fn[[:space:]]+<filter>[ (]`), so a mention in a comment no
+     longer satisfies it, and each RED leg requires its own log to name the frozen file — the repo-relative
+     path for `rust`/`integration`, the basename for `frontend`, whose reporter shortens paths. Verified
+     against the delivered entries: all four declarations match exactly once, the comment decoy is refused, and
+     the real RED logs name the file (7, 8, 10 and 73 hits);
+   - **every manifest value's shape is enforced before use.** Each value is substituted into a shell command as
+     a GitHub expression, so the reader validates it (`red`/`green` = 40 hex, `test_path` = a path-shaped string
+     with no whitespace, `filter` = an identifier, `kind` ∈ the three kinds), and requires `test_path`,
+     `expect_red` and `expect_green` to be non-empty. This is what makes the substitutions safe: an **empty**
+     `test_path` previously turned the identity step into a silent no-op — no comparison, exit 0 — and a value
+     carrying `;` executed shell inside the gate, because `;` needs no quote to end a statement and the
+     quote check therefore never saw it. Both were demonstrated against an earlier revision;
+   - for the filtered kinds (`rust`, `integration`) the manifest's `filter` must be non-empty and name a
+     `fn`/`mod` declaration inside the compared file, so a filter that matches nothing cannot masquerade as a
+     frozen test; a `frontend` entry has no filter (Vitest selects by path), and the check is skipped for it
+     rather than run against an empty pattern — which would fail every frontend entry before its tests ran;
    - and the comparison runs twice: against the **fix commit** (the causal transition) and against the
      **pushed HEAD** (what is actually delivered), because a later commit could re-touch the test or the code
      after the fix and the transition would still read green;
@@ -73,30 +95,36 @@ of the assertion (e.g. `must declare 400` for an assertion whose full text is
 8. a RED run whose output lacks `expect_red`;
 9. a GREEN run that does not report `test result: ok. N passed` (N ≥ 1) or lacks `expect_green`.
 
-## What this gate does NOT prove — its residual holes, stated rather than implied
+## What this gate does NOT prove — its residual limits, stated rather than implied
 
-An independent auditor attacked the inline-test check and found cases it does not cover. They are listed here
-because a gate whose limits are unknown is worse than one whose limits are documented:
+The identity check is now **whole-file and unconditional**: every entry names a file that is entirely tests
+(a sibling `tests.rs`, the frontend test file, `tests/…`), so there is no region extraction and nothing a file's
+content can do to weaken the comparison. The earlier heuristic — and the two bypasses an independent auditor
+executed against it — is gone with the inline modules that required it.
 
-- **The inline-test region is a heuristic, not a proof.** It starts at the first `#[cfg(test)]`,
-  `#[cfg(all(test, …))]`, `#[cfg(any(test, …))]` or `#![cfg(test)]` line and runs to EOF. Still outside it:
-  a multi-line `#[cfg(\n test\n)]`; a test module whose body lives in another file
-  (`#[cfg(test)] mod tests;`); a test declared *above* the marker; and a marker that appears only inside a
-  raw string (which makes the region start at the string). A determined author can therefore weaken a test and
-  still pass the region comparison.
-- **The check cannot tell which file the test lives in.** `test_path` is what it freezes; the runs use the
-  `filter`. A decoy file whose module merely *mentions* the test name used to satisfy both — the `fn <filter>`
-  requirement narrows it, but a filter that names a module rather than a function (as one branch's does) cannot
-  satisfy it, so this check is skipped for such entries rather than faked.
-- **What actually carries the causal claim** are the run-based checks, which are harder to fool: the RED leg
-  must fail *with the quoted assertion text* and a `FAILED` summary and no build error, with `running N tests`
-  (N > 0); the GREEN and HEAD legs must report `ok. N passed` with N ≥ 1 and the behavioural marker; the
-  ancestry checks tie both SHAs to the pushed ref; and for the integration kind a skip is refused outright.
-  A test that never ran, or that was filtered to nothing, cannot satisfy those.
+What remains true, and is not proven by this gate:
 
-If a branch needs a *sound* frozen-test guarantee rather than a heuristic, the fix is structural: put the
-regression tests in their own file (as the frontend and integration entries already do, where whole-file
-identity is exact) rather than relying on region extraction.
+- **The `#[rustfmt::skip]` on three declarations.** The moved modules keep `#[rustfmt::skip]` on their
+  `#[cfg(test)] mod …;` line, because rustfmt reprints an out-of-line module as a crate root and would otherwise
+  demand the body be outdented to column 0 — which would destroy the byte-identity this gate proves. The cost,
+  stated rather than implied: rustfmt no longer reformats those three files.
+- **The filter ties the entry to a file, not to the runner's selection.** The gate requires the filter to appear
+  as a `fn`/`mod` declaration inside the compared file, which defeats the decoy-path attack; it cannot prove that
+  `cargo test -- <filter>` selects exactly that test — the RED/GREEN legs prove *some* test failed and *some*
+  test passed under that filter, and the log is quoted so a reader can see which.
+- **One test is one test.** The gate proves the named assertion's transition with the file unchanged, and — after
+  the decoy fix — that the failure came from that file. It does not prove the fix is minimal, or that no other
+  behaviour changed: the RE gate's differential is what covers that, and the two gates are separate required
+  checks for that reason.
+- **`red == green`, and pairs whose ancestry is only "some ancestor", are not rejected.** Neither can produce a
+  green gate deterministically — the two legs would have to report contradictory exits from the same tree, which
+  only a flaky test could do — so they are documented rather than checked.
+- **A branch certifies itself with the workflow and manifest it ships.** Nothing in the run hashes those bytes
+  across the branches, so "identical on all five" is verified out-of-band (the loop at the top of
+  `delivery-verdicts.md`), not by the gate. A reviewer must run that loop.
+- **A skipped leg is not evidence.** The trigger lists and the matrices are set-equal, so a push always has one
+  working leg; the required job now also refuses a ref that is not one of the five, which closes the
+  `workflow_dispatch` path to a vacuous green that an auditor demonstrated was reachable.
 
 ## Honest limits
 
