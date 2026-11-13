@@ -2064,3 +2064,5 @@ mod registration_domain_gate_tests {
         assert_eq!(err.error_type, "RegistrationDomainNotAllowed");
     }
 }
+
+#[cfg(test)] #[rustfmt::skip] mod setup_openapi_contract_tests;
