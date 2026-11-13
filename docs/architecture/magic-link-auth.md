@@ -189,7 +189,7 @@ Two distinct visibility regimes:
 
 An authenticated caller resending to themselves bypasses both send caps. The bypass signal is "presence (not validity) of an Authorization header or access cookie" — a stale-cookie holder gets a 401 from any other endpoint they touch, so the worst-case bypass is narrow.
 
-The per-IP backstop respects `OXICLOUD_TRUST_PROXY_CIDR` for client IP resolution: behind a reverse proxy, the upstream IP from `X-Forwarded-For` (leftmost) is used; without a configured trusted CIDR, the proxy's IP would be used and the backstop would effectively become a single bucket.
+The per-IP backstop respects `OXICLOUD_TRUST_PROXY_CIDR` for client IP resolution: behind a reverse proxy, the effective client IP is the **rightmost** `X-Forwarded-For` entry that is not itself a trusted proxy (proxies append, so everything to its left is client-supplied); without a configured trusted CIDR, the proxy's IP would be used and the backstop would effectively become a single bucket.
 
 ## Defence-in-depth boundary protections
 
