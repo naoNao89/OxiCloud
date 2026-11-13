@@ -6529,3 +6529,36 @@ mod db_connection_string_env_fallback_tests {
         wipe();
     }
 }
+
+#[cfg(test)]
+mod setup_budget_config_tests {
+    //! `/api/setup` is limited from a budget of its **own**, so the effective
+    //! configuration must describe one: a `setup` pair beside the register pair
+    //! that `main.rs` builds the setup limiter from.
+    //!
+    //! The assertions read the `Debug` rendering rather than the fields
+    //! themselves because this module has to compile against the tree where
+    //! those fields do not exist yet — that absence is exactly what it
+    //! asserts. `AppConfig::from_env()` (not `RateLimitConfig::default()`) is
+    //! the subject because that is the config the limiter factories are handed.
+    //!
+    //! Presence only, no numbers: the sibling `setup_rate_limit_budget_tests`
+    //! pins the values, and it mutates `OXICLOUD_RATE_LIMIT_SETUP_*` under its
+    //! own guard, which this module deliberately does not take (no env var can
+    //! remove a field from the struct).
+    use super::AppConfig;
+
+    #[test]
+    fn effective_config_carries_a_setup_budget_of_its_own() {
+        let dump = format!("{:?}", AppConfig::from_env().auth.rate_limit);
+        assert!(
+            dump.contains("setup_max_requests"),
+            "/api/setup is rate-limited from a budget of its own, so the \
+             effective rate-limit config must describe one; got {dump}"
+        );
+        assert!(
+            dump.contains("setup_window_secs"),
+            "the setup budget needs its own window too; got {dump}"
+        );
+    }
+}
