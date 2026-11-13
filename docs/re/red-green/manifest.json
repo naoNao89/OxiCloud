@@ -1,42 +1,40 @@
 {
-  "_comment": "Consumed by .github/workflows/red-green-gate.yml. See README.md in this directory for the contract, what the gate refuses, its value constraints (values must be shell-safe: no double quotes, backticks, dollar signs or backslashes) and its honest limits. Only the entry for the pushed ref is exercised per run. kind selects the leg: 'rust' runs cargo test --lib and compares the whole #[cfg(test)] region; 'integration' runs cargo test --test <test_target> against the job's postgres service and compares the whole test file (a skipped test is refused, so it cannot pass vacuously); 'frontend' runs vitest and compares the whole frontend-relative test file. test_path is frontend-relative for frontend and repo-relative otherwise. The _evidence fields are documentation only.",
+  "_comment": "Consumed by .github/workflows/red-green-gate.yml. Every entry is compared WHOLE-FILE: the test lives in its own file (a sibling tests.rs for the inline modules, the test file itself for frontend, tests/ for the integration case), so byte-identity needs no region heuristic. Values must be shell-safe (no double quotes, backticks, dollar signs or backslashes). test_path is frontend-relative for kind=frontend and repo-relative otherwise. The _evidence fields are documentation only; the gate reads exactly: branch, kind, red, green, test_path, test_target, filter, expect_red, expect_green.",
   "branches": [
     {
       "branch": "fix/limiter-window",
       "kind": "rust",
-      "red": "7f4b2a7f8c1ac4beb320aabd93b382bd0bbd9d7b",
-      "green": "67e6f76dafb09d28b1a3b6ec6d24840d564981a8",
-      "test_path": "src/interfaces/middleware/rate_limit.rs",
+      "red": "bc34e769b9ddd4f824e1bcda99d52bab47594a33",
+      "green": "7647daa77bfdd6023de8a2fe9adfc50617d844f9",
+      "test_path": "src/interfaces/middleware/rate_limit/tests.rs",
       "filter": "retry_after_header_shrinks_as_the_window_elapses",
       "expect_red": "so the wait must shrink",
       "expect_green": "retry_after_header_shrinks_as_the_window_elapses",
       "_evidence": {
         "base": "C0 389e161b",
-        "red_run": "exit 101; FAILED. 3 passed; 2 failed; the named assertion panicked at rate_limit.rs:329 with observed Retry-After 6 and 6 (the configured window) where the test requires second < first; the second failure covers the window-extension half",
+        "split": "the inline `#[cfg(test)] mod tests` moved verbatim into this file: the new file's sha256 ed68aa88667f386720911f7a8158e6a3a36ed04ba8399545ca182ec00199ff46 is byte-identical to the old module BODY, while the old region AS THE GATE EXTRACTED IT (wrapper lines included, 351 lines) hashed e778f3d98d157b15... — the two differ by construction, so only one is the gate's hash. The parent changed by exactly one added declaration line (`#[cfg(test)] #[rustfmt::skip] mod tests;`) with production lines 1-185 byte-identical",
+        "rustfmt_skip_cost": "the declaration carries #[rustfmt::skip] because rustfmt reprints an out-of-line `mod tests;` as a crate root and would demand the whole body be outdented to column 0 — which would break the byte-identity this entry exists to prove. Cost, stated rather than implied: rustfmt no longer reformats this file. Verified: `cargo fmt --all -- --check` is clean at RED and at HEAD with the skip attribute, and reports a diff without it",
+        "red_run": "exit 101; FAILED. 3 passed; 2 failed; the named assertion panicked with observed Retry-After 6 and 6 (the configured window) where the test requires second < first",
         "green_run": "exit 0; ok. 5 passed; 0 failed; surrounding recipient_notification module 5 passed",
-        "test_region": "351 lines, sha256 e778f3d98d157b15, byte-identical at both commits (re-checked with the gate's own extraction)",
         "clock_note": "no injectable clock pre- or post-patch, so a real window boundary is driven by sleep (3 s, and 2+3 s on separate threads)"
       }
     },
     {
       "branch": "feat/setup-budget",
       "kind": "integration",
-      "red": "4104c3c56a56f1bd870e9a1c8f2ec83e52c4cfaa",
-      "green": "27ab610bd8c3cbd3c438b09d0a4f38b41d8aa226",
+      "red": "3abfc5b89dc5ae392447b5163c84907b45930ce6",
+      "green": "675101927bc8f3a6dc645c5825edf63a981a6d60",
       "test_path": "tests/setup_budget_live_http.rs",
       "test_target": "setup_budget_live_http",
       "filter": "setup_attempts_do_not_consume_the_register_budget",
       "expect_red": "the setup route consumed the register budget",
       "expect_green": "setup: 2/3600 s",
       "_evidence": {
-        "base": "NOT C0: stacked on the verified limiter pair — 7f4b2a7f (limiter test) then 67e6f76d (limiter fix) then 4104c3c5 (setup test) then 27ab610b (setup fix); both limiter SHAs verified as ancestors",
-        "why_this_test": "the mission's Phase 7 asks for a test proving the shared budget conflicts with the approved independent-quota policy. A config-surface assertion does not, and the in-crate limiter test passes on BOTH sides because it constructs the instances it asserts about (patch 0002 says the same). This is a live-HTTP regression against the real binary: it boots the app on a throwaway database, consumes the setup route's budget, and asserts /api/auth/register still has its own quota.",
-        "red_run": "exit 101; the test's own output carries the numbers: setup attempts [400, 400, 429, 429, 429] then register after: 429 → assertion `left != right` failed at tests/setup_budget_live_http.rs:317 with the message naming both, and the pre-fix startup line reads `register: 2/3600 s` with no setup budget",
-        "green_run": "exit 0; register after the setup burst: 400; the startup line gains `setup: 2/3600 s`. Units: config_file tests 11 passed, setup_budget_config_tests 1 passed, setup_rate_limit_budget_tests 2 passed, rate_limit tests 4 passed",
-        "unchanged_test": "tests/setup_budget_live_http.rs sha256 bfbd541553a9283b5a1be88fc23c5a0d12cd9a2211852c4991595b7ab7b7f428 at BOTH commits; the fix commit does not touch tests/ or rate_limit.rs. The invalidation of the code, not the file, is what flips the result.",
-        "test_region_config": "src/common/config_file.rs (used by the earlier revision of this entry) is still byte-identical at both commits: 248 lines, sha256 9366b7cacb736693; its assertion is cited as supporting evidence, not as the policy proof",
-        "binary_provenance": "hazard rule applied: sources touched, Compiling lines quoted for both targets, frozen binaries hashed (lib a0090d36 then 3330eead; integration 9dc72aa3 both sides; app 0fdac3aa then 883669ee, re-hashed AFTER the run to prove the server under test was the frozen one)",
-        "pinning_note": "the integration test binary is byte-identical across the pair because it never links the crate — it spawns the app binary and speaks HTTP — so the artifact under test is the app binary, which differs; the test's own output proves which wiring it exercised"
+        "base": "NOT C0: stacked on the verified limiter pair — 7f4b2a7f then 67e6f76d then this branch's own pair",
+        "red_run": "exit 101: setup attempts [400,400,429,429,429] then register after: 429, assertion left != right; the pre-fix startup line has no setup: budget",
+        "green_run": "exit 0: register after the setup burst 400, and the startup line gains setup: 2/3600 s",
+        "rustfmt": "the test file is now rustfmt-clean; the RED commit was rebuilt to carry the formatting so the file stays identical at RED and GREEN (a later commit would have broken the whole-file identity)",
+        "skip_hole": "with no DB URL the test prints SKIP and passes; libtest captures a passing test's stdout, so a raw log shows nothing. The gate therefore passes --nocapture, fails closed on an unset URL, refuses SKIP, and requires the behavioural marker setup: 2/3600 s rather than the test name"
       }
     },
     {
@@ -50,49 +48,44 @@
       "expect_green": "28 passed",
       "_evidence": {
         "base": "C0 389e161b",
-        "red_run": "exit 1; Tests 4 failed | 24 passed (28); the new test fails on its own assertion at auth.test.ts:956 — expected 'NetworkError' not to be 'NetworkError'; the three earlier failures unchanged",
-        "green_run": "exit 0; Tests 28 passed (28); surrounding endpoints module 164 passed | 2 skipped; npm run check rc=0",
-        "deliberate_omission": "no status assertion: a bare-string throw carries status 0 in BOTH states, so status cannot discriminate; errorType (NetworkError to undefined) is the observable that does",
-        "test_file_sha256": "575cd68bdbb1b31dcd209cfec5872395b65b07851b30895ab2f5a014db70aa95 identical at RED and GREEN",
-        "fix_file_sha256": "148f38455299a689b21271d64377c81b07dcfd9227599bc799777663b941a53e identical to the published branch"
+        "red_run": "exit 1; Tests 4 failed | 24 passed (28); the new test fails on its own assertion — expected 'NetworkError' not to be 'NetworkError'",
+        "green_run": "exit 0; Tests 28 passed (28); npm run check rc=0",
+        "deliberate_omission": "no status assertion: a bare-string throw carries status 0 in BOTH states, so status cannot discriminate; errorType is the observable that does"
       }
     },
     {
       "branch": "docs/setup-openapi",
       "kind": "rust",
-      "red": "66571a4f704482579d859e2cbdf718b72df804d3",
-      "green": "ba447e39d334b68e955fc90ae115863a00adce70",
-      "test_path": "src/interfaces/api/handlers/auth_handler.rs",
-      "filter": "setup_openapi_contract",
+      "red": "3c50e7f545563dd460f2b63d97273f185ae4fe1c",
+      "green": "cbf867d77e53e4cf55bb32e0f39e9491473d8760",
+      "test_path": "src/interfaces/api/handlers/auth_handler/setup_openapi_contract_tests.rs",
+      "filter": "committed_spec_declares_the_setup_contract",
       "expect_red": "must declare 400",
-      "expect_green": "2 passed",
+      "expect_green": "1 passed",
       "_evidence": {
         "base": "C0 389e161b",
-        "red_run": "exit 101; FAILED. 0 passed; 2 failed; committed_spec_declares_the_setup_contract panicked at auth_handler.rs:2105 naming the missing status and the observed set (201, 403, 503); expect_red is a quote-free substring because the gate refuses values containing double quotes",
-        "green_run": "exit 0; ok. 2 passed; 0 failed; surrounding auth_handler module 4 passed",
-        "two_by_two_probe": "controlled four-cell experiment with binary freshness attested: red (source commit 1, stale artifact) attribute FAILED / artifact FAILED, binary 37b672ec; redmod (same source, regenerated artifact) attribute FAILED / artifact ok, SAME binary 37b672ec; probe1 (source commit 2, stale artifact) attribute ok / artifact FAILED, binary c142fd49; green (source commit 2, regenerated) both ok, SAME binary c142fd49. The source alone flips the attribute test, the artifact alone flips the artifact test, no third variable moved.",
-        "tree_provenance": "the arm's 33 MB upload is broken, so it assembled the mirror from a sibling's same-base mirror and normalised it against a C0 manifest: 567 build-relevant files, diff = 0 lines, with the two sibling-patched files restored before any build",
-        "regenerated_not_copied": "a fresh generate-openapi run over commit 2's attribute reproduces openapi.json 40bb734ea4523e521c6909d94e4883aca9ce8623c684b2991fa58677015e21d7, byte-identical to the published branch; the sandbox mirror has no .git so the run used the documented OXICLOUD_VERSION=v0.10.0 escape hatch",
-        "byte_identity": "auth_handler.rs f4ae90ed and openapi.json 40bb734e both identical to the published branch"
+        "split": "the inline module moved verbatim; the moved body's sha256 d1ff2cf255049cdef00f1d5596bbe385989ab43424e0f512d80b2dff92de901d is the old inline body, and the parent changed by one added declaration line with production lines 1-2067 byte-identical (the pre-existing registration_domain_gate_tests module stays where it was)",
+        "filter_change": "the old filter named the module (`setup_openapi_contract`), which the moved body cannot satisfy — the body has no `mod` declaration inside it. The filter is now the test function `committed_spec_declares_the_setup_contract`, declared in the new file, so the legs select exactly one test and expect_green becomes `1 passed`",
+        "red_run": "exit 101; FAILED. 0 passed; 2 failed at the old pair; with the new single-test filter the named assertion fails naming the missing status 400 against the declared set 201/403/503",
+        "green_run": "exit 0 with the artifact regenerated (openapi.json 40bb734e..., byte-identical to the published branch); the artefact layer is separately checked, see the 2x2 probe in the evidence document",
+        "ts_sdk": "this branch also carries the regenerated TypeScript SDK (a follow-up commit), which the artifact layer of ci.yml's drift job requires; without it that job fails on sdk.gen.ts/types.gen.ts"
       }
     },
     {
       "branch": "fix/trusted-proxy-xff",
       "kind": "rust",
-      "red": "45ca9aa35847d14819d596191e60c5bc624a2637",
-      "green": "ac6682502909b850a415b7bbeec33d7d974538f9",
-      "test_path": "src/interfaces/middleware/trusted_proxy.rs",
+      "red": "3e2a30c09d99ec30c8039498617c8f033f382b9a",
+      "green": "9b29e2c2b0e02c71452bdf42920e91cec6477c41",
+      "test_path": "src/interfaces/middleware/trusted_proxy/tests.rs",
       "filter": "client_ip_resolves_the_rightmost_untrusted_hop",
       "expect_red": "left == right",
       "expect_green": "client_ip_resolves_the_rightmost_untrusted_hop",
       "_evidence": {
         "base": "C0 389e161b",
-        "red_run": "exit 101; FAILED. 7 passed; 2 failed; the headline assertion panicked at trusted_proxy.rs:451 with left 1.1.1.1 vs right 2.2.2.2 for X-Forwarded-For: 1.1.1.1, 2.2.2.2 behind a trusted peer; the second failure at :650 is the spoofed-prefix consequence; the 7 pre-existing capsule tests pass in the same run",
+        "split": "the inline module moved verbatim (including the 7 pre-existing capsule tests that shared it, which is why the file is 398 lines for this branch's 2 new tests): the new file's sha256 c8c6f133b4888aa33cabb2c63cc7d60966b96a0634305761b9f9e7b06937fc8f is byte-identical to the old module BODY, while the old region as the gate extracted it (401 lines) hashed 55c93b964ad5c44b... The parent changed by exactly one added declaration line with production lines 1-269 byte-identical",
+        "red_run": "exit 101; FAILED. 7 passed; 2 failed; the headline assertion gives left 1.1.1.1 vs right 2.2.2.2 for X-Forwarded-For: 1.1.1.1, 2.2.2.2 behind a trusted peer; the second failure is the spoofed-prefix consequence",
         "green_run": "exit 0; ok. 9 passed; 0 failed",
-        "test_region": "401 lines, sha256 55c93b964ad5c44b, byte-identical at both commits (re-checked with the gate's own extraction); the fix commit's production half is byte-identical to the published branch",
-        "case_coverage": "boundaries (trusted peer vs untrusted peer vs peerless), malformed entry, duplicate X-Forwarded-For lines via HeaderMap::append (pinned as a known limitation: only the first line is read), and the ClientIpDisplay twin asserted byte-equal to client_ip_from_parts over 13 header/peer cases x include_port",
-        "binary_provenance": "hazard rule applied and quoted: sources touched, Compiling line, frozen binaries b51f03e2 (RED) and 888fd58d (GREEN), --list greped for the branch's test names (count 9) before measuring",
-        "follow_up_commit": "the round-13 bench example migration lands as its own commit so --all-targets --all-features still builds"
+        "follow_up": "a docs commit and the round-13 bench example migration ride after the fix; the example migration keeps --all-targets --all-features building"
       }
     }
   ]
