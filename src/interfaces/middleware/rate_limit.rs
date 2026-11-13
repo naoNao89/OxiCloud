@@ -532,100 +532,67 @@ mod tests {
         assert_eq!(limiter.check_and_increment("other"), Ok(1));
     }
 
-    /// One `Arc<RateLimiter>` is one budget, whichever route the request takes —
-    /// and a handler-level 400 spends it exactly like a success.
+    /// `/api/setup` and `/api/auth/register` have SEPARATE budgets: `main.rs`
+    /// builds a dedicated `RateLimiter` for setup out of
+    /// `OXICLOUD_RATE_LIMIT_SETUP_*`, so exhausting either route leaves the
+    /// other's slot intact — asserted in both directions.
     ///
-    /// Both halves are `main.rs` wiring facts: the auth routers share an instance
-    /// wherever the policy is one budget (`login` also covers the OPAQUE login
-    /// route), and `/api/setup` is handed the very same `register_limiter` the
-    /// register route uses — so exhausting the budget on one locks the other out,
-    /// which is what the assertions below pin (`setup_route()` +
-    /// `from_fn_with_state(register_limiter.clone(), rate_limit_register)`).
+    /// This replaces `two_routes_share_one_budget`, which pinned the wiring this
+    /// patch changes: `/api/setup` used to be handed the very same
+    /// `register_limiter`, so one 5-per-hour budget covered both endpoints — a
+    /// burst of registrations (or a bot probing `/api/auth/register`) locked the
+    /// operator out of the first-run wizard, and a mistyped setup attempt spent
+    /// registration budget.
     ///
-    /// Not a RED test: both behaviours hold on v0.10.0 and after
-    /// `0001-limiter-window.patch` alike. It guards the accounting through the
-    /// window rewrite (a per-key window must not become a per-route one) and the
-    /// 429 body + header shape.
+    /// Not a RED test: it builds the two instances it asserts about, which is
+    /// possible on v0.10.0 as well, so this is a guard rather than evidence of
+    /// the fix (the evidence is the two-arm run of `/api/setup` vs
+    /// `/api/auth/register` against a real server). What it guards: the
+    /// accounting stays per INSTANCE (a process-wide cache or a "share the
+    /// limiter to save memory" refactor fails here), and a handler-level 400
+    /// still spends the budget of the limiter in front of it.
+    ///
+    /// Symbols: pre-existing ones only (`RateLimiter::new`, the `rate_limit_*`
+    /// layers, the `retry-after` header) plus this module's own
+    /// `retry_after_header`, so the module still compiles on v0.10.0.
     #[tokio::test]
-    async fn two_routes_share_one_budget() {
-        let limiter = Arc::new(RateLimiter::new(2, 60, 100));
-
-        // Two routers, one limiter instance — the shape main.rs builds for
-        // register + setup.
-        let register_routes = Router::new().route("/auth/register", get(ok)).layer(
-            axum::middleware::from_fn_with_state(limiter.clone(), rate_limit_register),
-        );
-        let setup_routes =
+    async fn setup_and_register_have_separate_budgets() {
+        // Mirrors the wiring in `main.rs`: one limiter instance per route
+        // group. Budget 2 keeps exhaustion cheap; the register route answers
+        // 400 (a validation rejection must still count).
+        fn app(register_limiter: Arc<RateLimiter>, setup_limiter: Arc<RateLimiter>) -> Router {
             Router::new()
-                .route("/setup", get(ok))
+                .route("/auth/register", post(bad_request))
                 .layer(axum::middleware::from_fn_with_state(
-                    limiter.clone(),
+                    register_limiter,
                     rate_limit_register,
-                ));
-        let app = register_routes.merge(setup_routes);
+                ))
+                .merge(Router::new().route("/setup", get(ok)).layer(
+                    axum::middleware::from_fn_with_state(setup_limiter, rate_limit_register),
+                ))
+        }
 
-        let req = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
-
-        let first = app.clone().oneshot(req("/auth/register")).await.unwrap();
-        assert_eq!(first.status(), StatusCode::OK);
-
-        // 2nd request overall, on the OTHER route: still inside the shared
-        // budget, which only holds if both routes share one cache.
-        let second = app.clone().oneshot(req("/setup")).await.unwrap();
-        assert_eq!(second.status(), StatusCode::OK);
-
-        // 3rd request overall: rejected, with the Retry-After header.
-        let third = app.clone().oneshot(req("/auth/register")).await.unwrap();
-        assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(third.headers().get("retry-after").unwrap(), "60");
-
-        // The pin: exhausting the budget on /auth/register has already locked
-        // out /setup.
-        let fourth = app.clone().oneshot(req("/setup")).await.unwrap();
-        assert_eq!(fourth.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(fourth.headers().get("retry-after").unwrap(), "60");
-
-        let body = axum::body::to_bytes(fourth.into_body(), 4096)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "Too many requests");
-        assert_eq!(json["retry_after_secs"], 60);
-
-        // A handler-level rejection burns budget too: the limiter runs before
-        // `next.run`, so a typo in the setup wizard — 400 from validation,
-        // never reaching the database — spends the SAME register/setup budget a
-        // real registration would. With `max_requests = 2`, two 400s are
-        // served and the third request (on the other route) is already 429.
-        let strict = Arc::new(RateLimiter::new(2, 60, 100));
-        let rejecting_register = Router::new()
-            .route("/auth/register", post(bad_request))
-            .layer(axum::middleware::from_fn_with_state(
-                strict.clone(),
-                rate_limit_register,
-            ));
-        let rejecting_setup =
-            Router::new()
-                .route("/setup", get(ok))
-                .layer(axum::middleware::from_fn_with_state(
-                    strict.clone(),
-                    rate_limit_register,
-                ));
-        let rejecting = rejecting_register.merge(rejecting_setup);
-
-        let post_req = |uri: &str| {
+        let register_req = || {
             Request::builder()
                 .method("POST")
-                .uri(uri)
+                .uri("/auth/register")
                 .body(Body::empty())
                 .unwrap()
         };
+        let setup_req = || {
+            Request::builder()
+                .uri("/setup")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // ── Direction 1: spend register's budget; setup keeps its own slot. ──
+        let d1 = app(
+            Arc::new(RateLimiter::new(2, 60, 100)),
+            Arc::new(RateLimiter::new(2, 60, 100)),
+        );
         for attempt in 1..=2 {
-            let rejected = rejecting
-                .clone()
-                .oneshot(post_req("/auth/register"))
-                .await
-                .unwrap();
+            let rejected = d1.clone().oneshot(register_req()).await.unwrap();
             assert_eq!(
                 rejected.status(),
                 StatusCode::BAD_REQUEST,
@@ -636,11 +603,59 @@ mod tests {
                 "a 400 is not a 429 — no Retry-After"
             );
         }
-        let exhausted = rejecting.clone().oneshot(req("/setup")).await.unwrap();
+        let spent = d1.clone().oneshot(register_req()).await.unwrap();
         assert_eq!(
-            exhausted.status(),
+            spent.status(),
             StatusCode::TOO_MANY_REQUESTS,
-            "the two 400s spent the shared budget, so /setup is locked out"
+            "two 400s spent register's budget"
         );
+        let spent_after = retry_after_header(&spent);
+        assert!(
+            (1..=60).contains(&spent_after),
+            "the 429 still carries a remaining-window Retry-After; got {spent_after}"
+        );
+
+        for n in 1..=2 {
+            let own_slot = d1.clone().oneshot(setup_req()).await.unwrap();
+            assert_eq!(
+                own_slot.status(),
+                StatusCode::OK,
+                "/setup request {n}: its budget is untouched by register's"
+            );
+        }
+        let setup_spent = d1.clone().oneshot(setup_req()).await.unwrap();
+        assert_eq!(
+            setup_spent.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "setup's own budget is spent after its own two requests"
+        );
+
+        // ── Direction 2, fresh instances: spend setup's first; register's slot
+        //    is intact. ─────────────────────────────────────────────────────────
+        let d2 = app(
+            Arc::new(RateLimiter::new(2, 60, 100)),
+            Arc::new(RateLimiter::new(2, 60, 100)),
+        );
+        for n in 1..=2 {
+            assert_eq!(
+                d2.clone().oneshot(setup_req()).await.unwrap().status(),
+                StatusCode::OK,
+                "setup request {n}"
+            );
+        }
+        assert_eq!(
+            d2.clone().oneshot(setup_req()).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "setup's own budget is spent"
+        );
+        for n in 1..=2 {
+            let register_ok = d2.clone().oneshot(register_req()).await.unwrap();
+            assert_eq!(
+                register_ok.status(),
+                StatusCode::BAD_REQUEST,
+                "register request {n}: its budget is untouched by setup's"
+            );
+            assert!(register_ok.headers().get("retry-after").is_none());
+        }
     }
 }

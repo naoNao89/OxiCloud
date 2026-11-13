@@ -658,4 +658,54 @@ mod tests {
             "read from the environment but absent from KNOWN: {missing:?}"
         );
     }
+
+    /// `/api/setup` is rate-limited from a budget of its **own**: one limiter
+    /// instance per route group, so a burst on `/api/auth/register` cannot
+    /// spend the first-run wizard's slots and vice versa.
+    ///
+    /// A budget that exists only inside `main.rs` is not configurable, and
+    /// every other rate-limit knob is a config-file setting — so the setup
+    /// pair has to be one, and it has to be a pair of **its own**: a second
+    /// spelling of `register_max` / `register_window_secs` would put the two
+    /// endpoints back on one counter, which is the defect this pins.
+    #[test]
+    fn setup_budget_is_a_setting_of_its_own() {
+        let setup = flatten(
+            r#"
+            [auth.rate_limit]
+            setup_max = 2
+            setup_window_secs = 120
+            "#,
+        );
+        assert!(
+            setup.is_ok(),
+            "the setup budget must be settable from a config file; got {setup:?}"
+        );
+        let setup = setup.unwrap();
+        assert_eq!(
+            setup.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "OXICLOUD_RATE_LIMIT_SETUP_MAX",
+                "OXICLOUD_RATE_LIMIT_SETUP_WINDOW_SECS",
+            ],
+            "the setup pair must map to variables of its own"
+        );
+
+        let register = flatten(
+            r#"
+            [auth.rate_limit]
+            register_max = 5
+            register_window_secs = 3600
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            register.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "OXICLOUD_RATE_LIMIT_REGISTER_MAX",
+                "OXICLOUD_RATE_LIMIT_REGISTER_WINDOW_SECS",
+            ],
+            "register keeps its own pair — two budgets, two settings"
+        );
+    }
 }
