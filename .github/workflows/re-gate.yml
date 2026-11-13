@@ -1,0 +1,1028 @@
+# =============================================================================
+# RE gate — the behavioural reverse-engineering gate, one scoped case list per
+# delivery branch.
+#
+# WHY THIS FILE EXISTS
+#   docs/re/ is a behavioural RE of the *shipped* OxiCloud v0.10.0 build: a
+#   fixed-order HTTP corpus harness (docs/re/scripts/run-corpus.sh), the posture
+#   experiments, the build-vs-build differential (docs/re/scripts/diff-builds.py)
+#   and the byte-citation generator (docs/re/scripts/gen-section-c.py). Each
+#   delivery branch carries one of docs/re/patches/*.patch, which changes one
+#   behaviour. A green unit-test run cannot show that: the patches' own tests are
+#   `cargo test`-able, but the *behaviour* they change (window expiry, budget
+#   split, which X-Forwarded-For hop keys the limiter, the wire bytes of an
+#   error) lives on the wire and in the database.
+#
+#   This workflow re-runs the branch's scoped case list against a binary built
+#   from THIS branch, on a loopback-only throwaway Postgres, and compares it with
+#   the released binary whose sha256 is pinned below. Every assertion is spelled
+#   out in the "Scoped-case gate" step; the list per branch is in the job matrix.
+#
+# WHAT IT IS NOT
+#   * not a replacement for ci.yml — fmt/clippy/test/spec-drift/e2e stay there;
+#   * not the `--all-features` build — that needs `static-dist/` + wasmtime and
+#     is ci.yml's job (docs/re/ci-gate.md says exactly what is not runnable);
+#   * not a production probe — every request goes to 127.0.0.1 on the runner and
+#     every body is a synthetic `*.example.test` value. `:8086` is never touched.
+#
+# Trigger plumbing: `on.push.branches` is an allow-list, so `docs/**` and
+# `test/**` branches are invisible to ci.yml; that file grew the same two globs
+# (one identical commit on each of those three branches) — see docs/re/ci-gate.md.
+#
+# Least privilege: `contents: read` only. Naming `permissions` at all sets every
+# other scope (id-token, actions, packages, ...) to `none`; nothing here needs a
+# token beyond the checkout, and `pull_request_target` is deliberately not used.
+# =============================================================================
+name: RE gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "fix/limiter-window"
+      - "feat/setup-budget"
+      - "fix/trusted-proxy-xff"
+      - "docs/setup-openapi"
+      - "fix/spa-error-shapes"
+      - "test/error-byte-oracle"
+      - "docs/behavioral-re"
+    # Minutes are only spent on pushes that can move a scoped case. The RE
+    # harness itself (docs/re/**) is in here because the docs branch is one of
+    # the seven and its guards are bytes of docs/re/evidence.
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "migrations/**"
+      - "resources/gen/openapi.json"
+      - "frontend/**"
+      - "docs/re/**"
+      - ".github/workflows/re-gate.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per branch; a second push supersedes rather than queues (the corpus
+  # legs boot the app dozens of times, so a queue would only add wall-clock).
+  group: re-gate-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The build provenance of every arm binary in docs/re/evidence/binaries.txt:
+  # dev profile, default features, no debuginfo, no incremental. `RUSTFLAGS`
+  # here *overrides* `.cargo/config.toml`'s `target-cpu=native` (cargo gives the
+  # env var precedence), so it is carried explicitly instead of being dropped.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: "-C debuginfo=0 -C target-cpu=native"
+
+  # ── the RE harness ───────────────────────────────────────────────────────
+  # docs/re/scripts + docs/re/evidence are materialised from the commit that owns
+  # them, so a behavioural branch carries no copy and the harness cannot silently
+  # differ between two arms. The owning ref (docs/behavioral-re) has them in-tree
+  # and records its own github.sha as the harness ref.
+  #
+  # PINNED TO A COMMIT, NOT A BRANCH: with a branch name, a re-run of the same
+  # feature HEAD would execute whatever that branch's tip had become, so "this SHA
+  # was verified by that harness" would stop being reproducible. Bump only in a
+  # commit that says so, and re-run every branch afterwards.
+  #
+  # a31dda44 (2026-11-13): the corpus baseline could not run at all on a fresh
+  # service container — re_template_ensure booted the template through re_boot,
+  # which assigns the globals RE_PORT/RE_DB, so the caller then reset "re_tpl"
+  # against itself. The change is confined to that leak (+ a clearer failure
+  # message and one docstring); every arm the differential was measured from is
+  # unaffected, because the sandbox's persistent container never took that path.
+  RE_HARNESS_REF: a31dda44110c117879e111442c040203eb1354af
+  # Every delivery branch is cut from this commit (C0, the fork's `main`).
+  RE_BASE: 389e161bc6b94d720f50505e4e9c8219e56124d3
+
+  # ── scratch (never inside the checkout: git status stays clean for the
+  #    provenance record, and nothing lands in the artifact by accident) ────
+  CI_ROOT: /tmp/re-gate
+  RE_ROOT: /tmp/re-gate/root
+  RE_DATA: /tmp/re-gate/data
+  OUT: /tmp/re-gate/out
+  ART: /tmp/re-gate/artifacts
+
+  # ── Postgres: the harness's own defaults (lib-re.sh), pointed at the service
+  #    container. Trust auth on a loopback-only throwaway container: there is no
+  #    credential value anywhere, and the DSN in run-<label>/env.sh keeps the
+  #    harness's literal `RE_PGPASS` placeholder.
+  # The branch binary is a plain `cargo build` (dev, default features: NO
+  # bundled-assets), so it resolves its static source on disk
+  # (src/interfaces/web/mod.rs:58) and then requires <static_path>/locales
+  # (src/main.rs:570). The harness launches the app from a scratch run dir
+  # (lib-re.sh: `cd "$run"`), so the default `./static` does not exist there and
+  # the branch arm panics at boot -- while the released arm boots fine from its
+  # embedded corpus, which is exactly why only the branch arm failed. Point the
+  # app at the checkout's real assets.
+  OXICLOUD_STATIC_PATH: ${{ github.workspace }}/frontend/static
+  # RE_PG_PORT is deliberately NOT set here: the postgres service's host port is
+  # assigned by the runner and exported from job.services in the behaviour job's
+  # first step. A fixed 55432 collided with an outside occupant twice in ~40 jobs.
+  RE_PG_HOST: 127.0.0.1
+  RE_PG_USER: re_user
+  RE_PG_PASS: RE_pgpass_x9
+  # The harness reads its Postgres statement log from inside the container. A
+  # service container cannot have `logging_collector=on` (postgres is PID 1, so
+  # a restart would kill the container), so the statements go to the container's
+  # stderr and are captured with `docker logs` instead -> RE_PGLOG_IN=/dev/null
+  # keeps the windows empty and deterministic (they are excluded from the
+  # differential anyway: diff-builds.CHURN_STEP). See docs/re/ci-gate.md §4.
+  RE_PGLOG_IN: /dev/null
+  RE_PROBE_TAG: RE_PROBE
+
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Behavioural legs — the branches whose patch is only observable on the wire.
+  # ═══════════════════════════════════════════════════════════════════════════
+  re-gate-behaviour:
+    name: RE gate (behaviour) — ${{ matrix.branch }}
+    # `matrix` is not allowed in `jobs.<job_id>.if` (only github/needs/vars/
+    # inputs are), where an unavailable context silently evaluates false — i.e.
+    # the job would skip and the gate would be vacuous. So every step below
+    # carries the guard, and a non-matching leg is a runner that skips each step
+    # in a few seconds.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 0001 — the limiter window/Retry-After. Scoped cases: the budget
+          # (corpus), the deadline (shortened-window posture) and Retry-After
+          # across a 3600 s window (release posture).
+          - branch: fix/limiter-window
+            label: c1l
+            kind: limiter
+            scoped: rate-limit-6x ttl-refresh retry-after-constant
+            postures: experiments
+            marker: src/interfaces/middleware/rate_limit.rs
+          # 0001+0002 — /api/setup gets its own budget. Scoped cases: the budget
+          # split (corpus) and the reviewer-approved deadline trace, which lives
+          # in run-approval-cases.sh (`POSTURE=SETUP_*`/`REGISTER_*` pinned).
+          - branch: feat/setup-budget
+            label: c1
+            kind: setup_budget
+            scoped: shared-budget
+            postures: approval
+            marker: src/common/config.rs
+          # 0003 — only the rightmost untrusted X-Forwarded-For hop keys the
+          # bucket. Scoped cases: XFF ignored with no trust list (corpus) and the
+          # trusted-proxy posture (experiments).
+          - branch: fix/trusted-proxy-xff
+            label: c1p
+            kind: proxy
+            scoped: xff-ignored-untrusted xff-honoured-trusted
+            postures: experiments
+            marker: src/interfaces/middleware/trusted_proxy.rs
+    services:
+      # Pinned to the image the RE used (docs/re/identity.txt §3): the migrations
+      # need `pg_trgm` + `ltree`, and the app applies all 112 of them itself when
+      # the harness boots it against a template DB.
+      postgres:
+        image: postgres:18.2-alpine3.23
+        env:
+          POSTGRES_USER: re_user
+          POSTGRES_DB: postgres
+          # Throwaway, loopback-only, synthetic data: no password exists here, so
+          # none can leak into an artifact.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          # Dynamic host port, NOT 55432: a fixed mapping collided with an
+          # outside occupant of that port on two different runner VMs (twice in
+          # ~40 jobs), and `docker start` failing to bind kills the whole leg
+          # before a single step runs ("address already in use" at Initialize
+          # containers). RE_PG_PORT is exported from job.services below.
+          - "5432"
+        options: >-
+          --health-cmd "pg_isready -U re_user"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      # Disk hygiene, same pattern as ci.yml's cargo jobs: a dev-profile build of
+      # this crate plus ~20 app boots would otherwise crowd the runner.
+      - if: matrix.branch == github.ref_name
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
+      - uses: actions/checkout@v4
+        if: matrix.branch == github.ref_name
+        with:
+          # Full history: the payload guard diffs `$RE_BASE..HEAD`, and RE_BASE
+          # must be an ancestor for both that diff and the diffed provenance to
+          # mean anything.
+          fetch-depth: 0
+
+      # ── who/what is under test ────────────────────────────────────────────
+      - name: Record the tree identity (before anything is materialised)
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          mkdir -p "$ART"
+          {
+            echo "workflow          RE gate (re-gate.yml)"
+            echo "run id / attempt  ${{ github.run_id }} / ${{ github.run_attempt }}"
+            echo "repository        ${{ github.repository }}"
+            echo "ref               ${{ github.ref_name }}"
+            echo "harness sha       ${HARNESS_SHA:-unknown}"
+            echo "harness mode      ${HARNESS_MODE:-unknown}"
+            echo "event sha         ${{ github.sha }}"
+            echo "HEAD              $(git rev-parse HEAD)"
+            echo "revision          $(git log -1 --format='%H %ci %s')"
+            echo "base C0           $RE_BASE"
+            echo "payload files     $(git diff --name-only "$RE_BASE" HEAD | tr '\n' ' ')"
+            echo "payload diff sha  $(git diff "$RE_BASE" HEAD | sha256sum | cut -d' ' -f1)"
+            echo "worktree dirty    $(git status --porcelain | tr '\n' ' ')"
+            echo "uncommitted diff  $(git diff | sha256sum | cut -d' ' -f1)"
+            echo "rustc             $(rustc --version 2>/dev/null || echo '-')"
+            echo "cargo             $(cargo --version 2>/dev/null || echo '-')"
+            echo "runner            ${{ runner.os }} ${{ runner.arch }} (${{ runner.name }})"
+          } > "$ART/provenance.txt"
+          cat "$ART/provenance.txt"
+          # The postgres container's host port is assigned by the runner (see
+          # services.postgres.ports); the harness builds the app's DSN from it.
+          # GITHUB_ENV wins over any workflow-level default, and this step is the
+          # first one the matching leg runs, so every later step sees it.
+          echo "RE_PG_PORT=${{ job.services.postgres.ports['5432'] }}" >> "$GITHUB_ENV"
+          echo "postgres host port: ${{ job.services.postgres.ports['5432'] }}"
+
+      - name: The push must carry this branch's patch (or the gate is vacuous)
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$RE_BASE" HEAD; then
+            echo "::error::$RE_BASE is not an ancestor of ${{ github.ref_name }} — every baseline in docs/re/evidence was measured on a tree cut from it, so this gate (and the differential) would be measuring a tree nobody re-derived the evidence for. Re-cut the branch from C0, or re-derive the evidence and this gate's baselines."
+            exit 1
+          fi
+          changed=$(git diff --name-only "$RE_BASE" HEAD)
+          echo "changed files vs C0:"; echo "$changed"
+          hit=0
+          for p in ${{ matrix.marker }}; do
+            case "$changed" in *"$p"*) hit=1 ;; esac
+          done
+          if [ "$hit" != 1 ]; then
+            echo "::error::none of the paths this branch is defined by (${{ matrix.marker }}) is in \`git diff $RE_BASE...HEAD\`. The patch was not committed/pushed, so every comparison below would be between two unpatched trees and would pass vacuously."
+            exit 1
+          fi
+          echo "OK — the branch carries ${{ matrix.marker }}"
+
+      # ── harness + its staleness guard ─────────────────────────────────────
+      - name: Materialise the RE harness and check the committed differential
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          # Prefer the in-tree copy: the branch that owns docs/re/ is the source
+          # of truth, everything else elects the pinned ref.
+          if [ -f docs/re/scripts/lib-re.sh ] && [ -f docs/re/evidence/differential.json ]; then
+            HARNESS_MODE="in-tree"; HARNESS_SHA="$GITHUB_SHA"
+            echo "harness: in-tree copy at $HARNESS_SHA (this ref owns docs/re)"
+          else
+            HARNESS_MODE="pinned"
+            git fetch --depth=1 origin "$RE_HARNESS_REF"
+            HARNESS_SHA="$(git rev-parse FETCH_HEAD)"
+            if [ "$HARNESS_SHA" != "$RE_HARNESS_REF" ]; then
+              echo "::error::harness ref resolved to $HARNESS_SHA, not the pin $RE_HARNESS_REF"; exit 1
+            fi
+            git checkout "$HARNESS_SHA" -- docs/re/scripts docs/re/evidence
+            echo "harness: materialised from $HARNESS_SHA (pinned commit, not a branch tip)"
+          fi
+          echo "HARNESS_MODE=$HARNESS_MODE" >> "$GITHUB_ENV"
+          echo "HARNESS_SHA=$HARNESS_SHA" >> "$GITHUB_ENV"
+          # provenance.txt was written before the harness resolved, so replace the
+          # placeholder pair IN PLACE. Appending left a stale `harness sha
+          # unknown` above the real one, and every first-match reader -- including
+          # the artifact verification script -- then took the stale value.
+          sed -i -E \
+            -e "s|^harness sha .*|harness sha       $HARNESS_SHA|" \
+            -e "s|^harness mode .*|harness mode      $HARNESS_MODE|" \
+            "$ART/provenance.txt"
+          test -f docs/re/scripts/lib-re.sh
+          test -f docs/re/evidence/A.jsonl
+          test -f docs/re/evidence/differential.json
+          # Staleness guard: the artifact the differential's expected verdicts come
+          # from must still be a fresh default run of the committed JSONL.
+          python3 docs/re/scripts/diff-builds.py --check docs/re/evidence/differential.json
+
+      # ── the container the harness talks to ────────────────────────────────
+      - name: Point the harness at the service container and arm the SQL oracle
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          PG_CID='${{ job.services.postgres.id }}'
+          echo "RE_PG_CONTAINER=$PG_CID" >> "$GITHUB_ENV"
+          docker exec -i "$PG_CID" pg_isready -U "$RE_PG_USER"
+          # The migrations need these; failing here is much cheaper than failing
+          # halfway through `re_template_ensure`'s 112-migration boot.
+          avail=$(docker exec -i "$PG_CID" psql -U "$RE_PG_USER" -d postgres -tAc \
+            "SELECT count(*) FROM pg_available_extensions WHERE name IN ('pg_trgm','ltree')")
+          [ "$avail" = "2" ] || { echo "::error::pg_trgm/ltree missing from postgres:18.2-alpine3.23"; exit 1; }
+          # Statement log for the I3 oracle (see RE_PGLOG_IN above): what the app
+          # issued inside a case window. `log_statement` is SIGHUP-settable, so a
+          # reload is enough; `logging_collector` is not, hence stderr + docker logs.
+          for s in "ALTER SYSTEM SET log_statement='all'" \
+                   "ALTER SYSTEM SET log_min_duration_statement=0" \
+                   "ALTER SYSTEM SET log_connections=on" \
+                   "ALTER SYSTEM SET timezone='UTC'"; do
+            docker exec -i "$PG_CID" psql -U "$RE_PG_USER" -d postgres -tAc "$s" >/dev/null
+          done
+          docker exec -i "$PG_CID" psql -U "$RE_PG_USER" -d postgres -tAc "SELECT pg_reload_conf()" >/dev/null
+          got=$(docker exec -i "$PG_CID" psql -U "$RE_PG_USER" -d postgres -tAc "show log_statement")
+          [ "$got" = "all" ] || { echo "::error::log_statement=$got after pg_reload_conf(); the SQL oracle would be empty"; exit 1; }
+
+      # ── the binaries ──────────────────────────────────────────────────────
+      - name: Fetch the released v0.10.0 binary and pin its identity
+        if: matrix.branch == github.ref_name
+        env:
+          RE_RELEASE_BASE: https://github.com/AtalayaLabs/OxiCloud/releases/download/v0.10.0
+          # docs/re/identity.txt §1: the release's own SHA256SUMS, and the sha256
+          # of the extracted binary == what the operator's host runs
+          # (/opt/oxicloud/releases/0.10.0/oxicloud, MANIFEST binary_sha256).
+          EXPECTED_TARBALL_SHA256: 4decd0cc6c07e370a7b57ac4d17432468380255e567889e0f243e042fd4441f9
+          EXPECTED_BINARY_SHA256: 9d364fdd83f49d19dd086726b88830c2f95adc485001b16ad663dacfb665e080
+        run: |
+          set -euo pipefail
+          mkdir -p "$CI_ROOT/bin"
+          cd "$CI_ROOT/bin"
+          # Download to the asset's OWN filename: `sums.txt` carries the name from
+          # the release's SHA256SUMS, and `sha256sum -c` looks that name up on disk.
+          # (The first real run of this gate failed here — it had downloaded the
+          # bytes as `release.tar.gz` while the manifest named the asset, so `-c`
+          # reported "No such file or directory" and the behaviour leg never
+          # reached the corpus. Reading the log is what found it; nothing about it
+          # was branch-specific.)
+          A_TARBALL=oxicloud-0.10.0-x86_64-unknown-linux-musl.tar.gz
+          curl -fsSL -o "$A_TARBALL" "$RE_RELEASE_BASE/$A_TARBALL"
+          curl -fsSL -o SHA256SUMS "$RE_RELEASE_BASE/SHA256SUMS"
+          grep -F "$A_TARBALL" SHA256SUMS > sums.txt
+          [ "$(wc -l < sums.txt)" = "1" ] || { echo "::error::SHA256SUMS does not pin the x86_64-linux-musl asset exactly once"; exit 1; }
+          # Two independent identities: the release's own manifest, then the
+          # sha256 pinned in docs/re/identity.txt §1.
+          sha256sum -c --quiet sums.txt
+          echo "$EXPECTED_TARBALL_SHA256  $A_TARBALL" | sha256sum -c --quiet -
+          tar xzf "$A_TARBALL"
+          A=oxicloud-0.10.0-x86_64-unknown-linux-musl/oxicloud
+          echo "$EXPECTED_BINARY_SHA256  $A" | sha256sum -c --quiet -
+          "$PWD/$A" --version
+          {
+            echo "A (released v0.10.0, x86_64-unknown-linux-musl)"
+            echo "  tarball sha256   $(sha256sum "$A_TARBALL" | cut -d' ' -f1)"
+            echo "  binary  sha256   $(sha256sum "$A" | cut -d' ' -f1)"
+            echo "  expected sha256  $EXPECTED_BINARY_SHA256"
+            echo "  path             $PWD/$A"
+          } | tee "$ART/A.sha256.txt"
+
+      - name: Build the branch binary (same provenance as the arm binaries)
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          rustc --version; cargo --version
+          cargo build --bin oxicloud
+          cp target/debug/oxicloud "$CI_ROOT/bin/oxicloud-branch"
+          {
+            echo "${{ matrix.branch }} (built in this job, label ${{ matrix.label }})"
+            echo "  command    cargo build --bin oxicloud   (profile dev, default features)"
+            echo "  env        CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 RUSTFLAGS=\"$RUSTFLAGS\""
+            echo "  sha256     $(sha256sum "$CI_ROOT/bin/oxicloud-branch" | cut -d' ' -f1)"
+            echo "  bytes      $(stat -c%s "$CI_ROOT/bin/oxicloud-branch")"
+          } | tee "$ART/branch.sha256.txt"
+
+      # ── the corpus ────────────────────────────────────────────────────────
+      # Order matters: the released binary runs first, exactly as in the
+      # delivered run, so it owns the migration template DB (`re_tpl`) that every
+      # later case clones. Same scripts, same order, same inputs as the sandbox —
+      # that is the whole point of the differential (§6.1 of experiment-matrix.md).
+      - name: Corpus — released v0.10.0 (label A, the baseline)
+        if: matrix.branch == github.ref_name
+        env:
+          RE_BIN: /tmp/re-gate/bin/oxicloud-0.10.0-x86_64-unknown-linux-musl/oxicloud
+        run: bash docs/re/scripts/run-corpus.sh http://127.0.0.1:18086 "$OUT" A
+
+      - name: Corpus — the branch build (label ${{ matrix.label }})
+        if: matrix.branch == github.ref_name
+        env:
+          RE_BIN: /tmp/re-gate/bin/oxicloud-branch
+        run: bash docs/re/scripts/run-corpus.sh http://127.0.0.1:18086 "$OUT" "${{ matrix.label }}"
+
+      - name: Posture experiments — released v0.10.0
+        if: matrix.branch == github.ref_name && matrix.postures == 'experiments'
+        env:
+          RE_BIN: /tmp/re-gate/bin/oxicloud-0.10.0-x86_64-unknown-linux-musl/oxicloud
+        run: bash docs/re/scripts/run-rate-limit-experiments.sh http://127.0.0.1:18086 "$OUT" A
+
+      - name: Posture experiments — the branch build
+        if: matrix.branch == github.ref_name && matrix.postures == 'experiments'
+        env:
+          RE_BIN: /tmp/re-gate/bin/oxicloud-branch
+        run: bash docs/re/scripts/run-rate-limit-experiments.sh http://127.0.0.1:18086 "$OUT" "${{ matrix.label }}"
+
+      # The three cases a reviewer made a CONDITION of approving 0002, plus the
+      # deadline trace on the composition. Labels are the delivered ones
+      # (apv-a / apv-c1) so the records land under the filenames the citation
+      # generator expects.
+      - name: Approval cases — released v0.10.0 (label apv-a)
+        if: matrix.branch == github.ref_name && matrix.postures == 'approval'
+        env:
+          RE_BIN: /tmp/re-gate/bin/oxicloud-0.10.0-x86_64-unknown-linux-musl/oxicloud
+        run: bash docs/re/scripts/run-approval-cases.sh http://127.0.0.1:18086 "$OUT" apv-a
+
+      - name: Approval cases — the branch build (label apv-c1)
+        if: matrix.branch == github.ref_name && matrix.postures == 'approval'
+        env:
+          RE_BIN: /tmp/re-gate/bin/oxicloud-branch
+        run: bash docs/re/scripts/run-approval-cases.sh http://127.0.0.1:18086 "$OUT" apv-c1
+
+      - name: The approved deadline trace must satisfy every citation (fresh records)
+        if: matrix.branch == github.ref_name && matrix.postures == 'approval'
+        run: |
+          set -euo pipefail
+          # gen-section-c.py::verify_citations() re-derives each cited
+          # status/Retry-After/state value and exits 2 naming every citation that
+          # drifted. Run it in a mirror whose apv-* records are THIS run's and
+          # whose other inputs are the committed ones: exit 0 means the freshly
+          # built binary reproduces the trace the reviewer approved (the 429 that
+          # does not extend the deadline: t21-req4 == 400, Retry-After 15 -> 6 ->
+          # 10, and the budget split in `setup-get-spends-setup-budget`).
+          # The tool this step trusts is itself pinned by a negative control on the
+          # docs/behavioral-re leg (see docs/re/ci-gate.md §3).
+          mirror=$CI_ROOT/mirror-fresh
+          rm -rf "$mirror"; mkdir -p "$mirror/docs/re"
+          cp -R docs/re/scripts docs/re/evidence "$mirror/docs/re/"
+          for f in apv-a apv-a-setupbudget apv-a-setupdeadline apv-c1 apv-c1-setupbudget apv-c1-setupdeadline; do
+            test -f "$OUT/$f.jsonl"
+            cp -f "$OUT/$f.jsonl" "$mirror/docs/re/evidence/"
+          done
+          ( cd "$mirror" && python3 docs/re/scripts/gen-section-c.py "$ART/section-c.fresh.md" )
+          echo "OK — every §C.7.1 citation holds on this run's records"
+
+      # ── the differential ──────────────────────────────────────────────────
+      - name: Differential (fresh corpus vs the committed A/c0 baselines)
+        if: matrix.branch == github.ref_name
+        env:
+          LBL: ${{ matrix.label }}
+        run: |
+          set -euo pipefail
+          ev=$CI_ROOT/evidence; rm -rf "$ev"; mkdir -p "$ev"
+          # c0 = the delivered record of THIS commit with no patch applied (the
+          # causal edge: same commit, same profile family, only the patch differs).
+          for f in c0.jsonl c0-rl3600.jsonl c0-regwin15.jsonl c0-max1win15.jsonl c0-xff.jsonl; do
+            cp -f "docs/re/evidence/$f" "$ev/"
+          done
+          # Everything else is this run's: A (hash-pinned release) + the branch
+          # build, corpus and postures.
+          for f in A.jsonl A-rl3600.jsonl A-regwin15.jsonl A-max1win15.jsonl A-xff.jsonl \
+                   "$LBL.jsonl" "$LBL-rl3600.jsonl" "$LBL-regwin15.jsonl" "$LBL-max1win15.jsonl" "$LBL-xff.jsonl"; do
+            [ -f "$OUT/$f" ] && cp -f "$OUT/$f" "$ev/"
+          done
+          python3 docs/re/scripts/diff-builds.py "$ev" "$ART/differential.$LBL.json" A c0 "$LBL" \
+            | tee "$ART/differential.$LBL.txt"
+
+      # ── the gate itself ───────────────────────────────────────────────────
+      - name: Scoped-case gate — the branch's own case list
+        if: matrix.branch == github.ref_name
+        env:
+          DOC: /tmp/re-gate/artifacts/differential.${{ matrix.label }}.json
+          COMMITTED: docs/re/evidence/differential.json
+          LBL: ${{ matrix.label }}
+          SCOPED: ${{ matrix.scoped }}
+          KIND: ${{ matrix.kind }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          doc = json.load(open(os.environ['DOC']))
+          L = os.environ['LBL']
+          scoped = os.environ['SCOPED'].split()
+          kind = os.environ['KIND']
+          fail = []
+
+          def by_case(d):
+              return {c['case_id']: c for c in d['cases']}
+
+          D = by_case(doc)
+          # (1) every prediction the differential evaluated must hold. A failed
+          #     claim IS the finding: it is the per-patch prediction, stated in
+          #     diff-builds.py, checked against this build's own record.
+          for cid, c in D.items():
+              for cl in c.get('claims', []):
+                  if not cl['ok']:
+                      fail.append('FAILED CLAIM %s/%s -> %s | observed %s'
+                                  % (cid, cl['label'], cl['claim'][:140], cl['observed']))
+
+          # (2) the scoped cases must be present for this build and must come out
+          #     the way the delivered artifact records them for the same label.
+          try:
+              B = by_case(json.load(open(os.environ['COMMITTED'])))
+          except Exception as exc:  # noqa: BLE001
+              B = {}
+              fail.append('cannot read the committed artifact: %s' % exc)
+          for cid in scoped:
+              f = D.get(cid)
+              if not f or L not in f.get('builds', {}):
+                  fail.append('scoped case %s has no %s record in this run' % (cid, L))
+                  continue
+              fv = (f.get('vs_A') or {}).get(L, {}).get('verdict')
+              bv = ((B.get(cid) or {}).get('vs_A') or {}).get(L, {}).get('verdict')
+              if not fv:
+                  fail.append('scoped case %s: no vs_A verdict for %s' % (cid, L))
+              elif bv and fv != bv:
+                  fail.append('scoped case %s/%s verdict %r != committed %r' % (cid, L, fv, bv))
+              if fv == 'regression':
+                  fail.append('scoped case %s/%s = regression' % (cid, L))
+
+          def steps(cid):
+              b = (D.get(cid) or {}).get('builds', {}).get(L) or {}
+              return {s['name']: s for s in b.get('steps', [])}
+
+          def st(cid, name):
+              return ((steps(cid).get(name) or {}).get('response') or {}).get('status')
+
+          def ra(cid, name):
+              return ((steps(cid).get(name) or {}).get('response') or {}).get('retry_after')
+
+          def sql(cid, name):
+              return (steps(cid).get(name) or {}).get('app_sql_statement_count')
+
+          def ran(cid, name):
+              return (steps(cid).get(name) or {}).get('handler_ran')
+
+          def ips(cid, name):
+              return (steps(cid).get(name) or {}).get('limiter_ip')
+
+          # (3) the behaviour the branch is supposed to change, spelled out.
+          if kind == 'limiter':
+              got = [st('rate-limit-6x', 'post-%d' % i) for i in range(1, 7)]
+              if got[:5] != [400] * 5 or got[5] != 429:
+                  fail.append('rate-limit-6x: expected 5 served then a 429, got %r' % (got,))
+              r6 = ra('rate-limit-6x', 'post-6')
+              if not (r6 and r6.isdigit() and int(r6) < 3600):
+                  fail.append('rate-limit-6x/post-6: Retry-After must be the REMAINING time '
+                              '(< the 3600 s window), got %r' % r6)
+              if ran('rate-limit-6x', 'post-6') or sql('rate-limit-6x', 'post-6') != 0:
+                  fail.append('rate-limit-6x/post-6: a rejected request must not reach the '
+                              'handler nor issue SQL (handler_ran=%r app_sql_statement_count=%r)'
+                              % (ran('rate-limit-6x', 'post-6'), sql('rate-limit-6x', 'post-6')))
+              trace = [(n, st('ttl-refresh', n), ra('ttl-refresh', n))
+                       for n in ('t0-req1', 't0-req2', 't9-req3', 't21-req4', 't26-req5')]
+              if st('ttl-refresh', 't21-req4') != 400:
+                  fail.append('ttl-refresh: the window must close on schedule (t21-req4 == 400, '
+                              'i.e. a 429 does not extend it), got %r' % (trace,))
+              if st('ttl-refresh', 't26-req5') != 429:
+                  fail.append('ttl-refresh: t26-req5 must be 429 again (the re-opened window '
+                              'filled by the served request), got %r' % st('ttl-refresh', 't26-req5'))
+              if ra('ttl-refresh', 't9-req3') in (None, '', '15'):
+                  fail.append('ttl-refresh/t9-req3: Retry-After must be the remaining time, '
+                              'not the configured window, got %r' % ra('ttl-refresh', 't9-req3'))
+              r = ra('retry-after-constant', 'post-after-20s')
+              if not (r and r.isdigit() and abs(int(r) - 3580) <= 30):
+                  fail.append('retry-after-constant: Retry-After 20 s into a 3600 s window must '
+                              'be ~3580 (remaining), got %r' % r)
+          elif kind == 'setup_budget':
+              if st('shared-budget', 'setup-after-register') != 400:
+                  fail.append('shared-budget: a spent REGISTER budget must not lock /api/setup '
+                              'out (setup-after-register == 400), got %r'
+                              % st('shared-budget', 'setup-after-register'))
+              if st('shared-budget', 'register-after-setup') != 201:
+                  fail.append('shared-budget: a spent SETUP budget must not lock '
+                              '/api/auth/register out (register-after-setup == 201), got %r'
+                              % st('shared-budget', 'register-after-setup'))
+          elif kind == 'proxy':
+              got = [st('xff-ignored-untrusted', 'xff-%d' % i) for i in range(1, 7)]
+              if got[:5] != [400] * 5 or got[5] != 429:
+                  fail.append('xff-ignored-untrusted: with no trust list every X-Forwarded-For '
+                              'is ignored and all six land in the PEER bucket (5 served, 6th '
+                              '429), got %r' % (got,))
+              if ips('xff-ignored-untrusted', 'xff-6') != '127.0.0.1':
+                  fail.append('xff-ignored-untrusted: the rejection must be keyed on the peer, '
+                              'got limiter_ip=%r' % ips('xff-ignored-untrusted', 'xff-6'))
+              want = {'xff-6-1': 400, 'xff-7-1': 400, 'xff-6-2': 400, 'xff-7-2': 400,
+                      'xff-6-3': 400, 'xff-7-3': 429, 'victim-1': 400}
+              for name, want_status in want.items():
+                  if st('xff-honoured-trusted', name) != want_status:
+                      fail.append('xff-honoured-trusted/%s: expected %d, got %r'
+                                  % (name, want_status, st('xff-honoured-trusted', name)))
+              if ips('xff-honoured-trusted', 'xff-7-3') != '10.0.0.5':
+                  fail.append('xff-honoured-trusted/xff-7-3: the bucket of a spoofed chain must '
+                              'be the RIGHTMOST untrusted hop (10.0.0.5), got %r'
+                              % ips('xff-honoured-trusted', 'xff-7-3'))
+          else:
+              fail.append('unknown scoped-case kind %r' % kind)
+
+          if fail:
+              print('RE GATE FAILED (%d):' % len(fail))
+              for f in fail:
+                  print('  -', f)
+              print('\nThe differential these assertions read: %s' % os.environ['DOC'])
+              raise SystemExit(1)
+          print('RE GATE PASSED — %s: %s' % (L, ' '.join(scoped)))
+          PY
+
+      # ── evidence out ──────────────────────────────────────────────────────
+      - name: Collect the run's evidence (sanitized)
+        if: always() && matrix.branch == github.ref_name
+        run: |
+          set +e
+          # The harness's own redactor: it strips the throwaway DSN placeholder and
+          # any JWT-shaped token before anything is uploaded.
+          . docs/re/scripts/lib-re.sh 2>/dev/null
+          mkdir -p "$ART/logs"
+          # the corpus + posture JSONL (the artifact the assertions read)
+          cp -f "$OUT"/*.jsonl "$ART/" 2>/dev/null
+          cp -f "$OUT"/*.run.txt "$ART/" 2>/dev/null
+          # app logs, per instance, redacted
+          for d in "$RE_ROOT"/run-*; do
+            [ -d "$d" ] || continue
+            l=$(basename "$d")
+            [ -f "$d/app.log" ] || continue
+            re_redact < "$d/app.log" > "$ART/logs/$l.app.log"
+            for f in startup.ratelimit.txt startup.trustedproxy.txt env.sh; do
+              [ -f "$d/$f" ] && re_redact < "$d/$f" > "$ART/logs/$l.$f"
+            done
+          done
+          # what the app issued SQL-wise, straight off the container's stderr
+          if [ -n "${RE_PG_CONTAINER:-}" ] && docker inspect "$RE_PG_CONTAINER" >/dev/null 2>&1; then
+            docker logs "$RE_PG_CONTAINER" > "$ART/logs/pg-container.log" 2>&1
+            re_redact < "$ART/logs/pg-container.log" > "$ART/logs/pg-container.redacted.log" \
+              && mv "$ART/logs/pg-container.redacted.log" "$ART/logs/pg-container.log"
+          fi
+          # the effective posture, as the app itself reported it at boot
+          grep -h 'Rate limiting enabled\|trusted proxy CIDRs' "$RE_ROOT"/run-*/app.log 2>/dev/null \
+            | sort -u | tail -20 > "$ART/effective-posture.txt"
+          {
+            echo "artifacts for ${{ matrix.branch }} (label ${{ matrix.label }})"
+            echo "  differential   differential.${{ matrix.label }}.json  (+ .txt summary)"
+            echo "  corpus JSONL   ${{ matrix.label }}.jsonl, A.jsonl, and the posture files"
+            echo "  binaries       A.sha256.txt (hash-pinned release), branch.sha256.txt"
+            echo "  logs           logs/*.app.log (redacted), logs/pg-container.log (redacted)"
+            echo "  NOTE the raw per-case windows the JSONL points at (cases/...) stay on the"
+            echo "       runner, as in the sandbox: the trim rule in lib-re.sh is deliberate."
+          } > "$ART/README.txt"
+          ls -la "$ART" "$ART/logs" 2>/dev/null
+          exit 0
+
+      - name: Upload the evidence
+        if: always() && matrix.branch == github.ref_name
+        uses: actions/upload-artifact@v4
+        with:
+          name: re-gate-${{ matrix.label }}
+          path: /tmp/re-gate/artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Static legs — no app, no database: a generated artifact, a frontend throw
+  # oracle, a byte-length oracle, and the RE document's own guards.
+  # ═══════════════════════════════════════════════════════════════════════════
+  re-gate-static:
+    name: RE gate (static) — ${{ matrix.branch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 0004 — the utoipa attribute + the artifact it guards.
+          - branch: docs/setup-openapi
+            kind: openapi
+            marker: src/interfaces/api/handlers/auth_handler.rs resources/gen/openapi.json
+          # the SPA's error-shape normalisation (no patch file; frontend work).
+          - branch: fix/spa-error-shapes
+            kind: frontend
+            marker: frontend/src/lib/api/endpoints/auth.test.ts
+          # the 4xx wire-byte oracle for ErrorResponse (test-only file).
+          - branch: test/error-byte-oracle
+            kind: unit
+            marker: src/interfaces/errors.rs
+          # the RE document + its generators: bytes, citations, negative control.
+          - branch: docs/behavioral-re
+            kind: guards
+            marker: docs/re/scripts/gen-section-c.py docs/re/runtime-evidence.md
+    steps:
+      # Only the two cargo legs need disk hygiene; the frontend and guards legs
+      # are node/python and do not.
+      - if: matrix.branch == github.ref_name && (matrix.kind == 'openapi' || matrix.kind == 'unit')
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
+      - uses: actions/checkout@v4
+        if: matrix.branch == github.ref_name
+        with:
+          # Full history: the payload guard diffs `$RE_BASE..HEAD`.
+          fetch-depth: 0
+
+      - name: Record the tree identity
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          mkdir -p "$ART"
+          {
+            echo "workflow          RE gate (re-gate.yml)"
+            echo "run id / attempt  ${{ github.run_id }} / ${{ github.run_attempt }}"
+            echo "repository        ${{ github.repository }}"
+            echo "ref               ${{ github.ref_name }}"
+            echo "harness sha       ${HARNESS_SHA:-unknown}"
+            echo "harness mode      ${HARNESS_MODE:-unknown}"
+            echo "HEAD              $(git rev-parse HEAD)"
+            echo "revision          $(git log -1 --format='%H %ci %s')"
+            echo "base C0           $RE_BASE"
+            echo "payload files     $(git diff --name-only "$RE_BASE" HEAD | tr '\n' ' ')"
+            echo "payload diff sha  $(git diff "$RE_BASE" HEAD | sha256sum | cut -d' ' -f1)"
+            echo "worktree dirty    $(git status --porcelain | tr '\n' ' ')"
+            echo "runner            ${{ runner.os }} ${{ runner.arch }} (${{ runner.name }})"
+          } > "$ART/provenance.txt"
+          cat "$ART/provenance.txt"
+
+      - name: The push must carry this branch's change (or the gate is vacuous)
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$RE_BASE" HEAD; then
+            echo "::error::$RE_BASE is not an ancestor of ${{ github.ref_name }} — the delivery branches are cut from C0; re-cut it or re-derive this gate's baselines."
+            exit 1
+          fi
+          changed=$(git diff --name-only "$RE_BASE" HEAD)
+          echo "changed files vs C0:"; echo "$changed"
+          hit=0
+          for p in ${{ matrix.marker }}; do
+            case "$changed" in *"$p"*) hit=1 ;; esac
+          done
+          if [ "$hit" != 1 ]; then
+            echo "::error::none of the paths this branch is defined by (${{ matrix.marker }}) is in \`git diff $RE_BASE...HEAD\` — the change was not committed/pushed, so this leg would be vacuous."
+            exit 1
+          fi
+          echo "OK — the branch carries ${{ matrix.marker }}"
+
+      - name: Materialise the RE harness and check the committed differential
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          # Only the guards leg reads docs/re/scripts; the openapi, frontend and
+          # unit legs compile the branch's own spec/frontend/tests. They must SAY
+          # that in the artifact rather than inherit the pre-resolution
+          # placeholder, which read "unknown" and meant nothing.
+          if [ "${{ matrix.kind }}" != "guards" ]; then
+            HARNESS_MODE="not-used"; HARNESS_SHA="-"
+            echo "harness: not used by the ${{ matrix.kind }} leg (it reads no docs/re/scripts)"
+          elif [ -f docs/re/scripts/lib-re.sh ] && [ -f docs/re/evidence/differential.json ]; then
+            HARNESS_MODE="in-tree"; HARNESS_SHA="$GITHUB_SHA"
+            echo "harness: in-tree copy at $HARNESS_SHA (this ref owns docs/re)"
+          else
+            HARNESS_MODE="pinned"
+            git fetch --depth=1 origin "$RE_HARNESS_REF"
+            HARNESS_SHA="$(git rev-parse FETCH_HEAD)"
+            if [ "$HARNESS_SHA" != "$RE_HARNESS_REF" ]; then
+              echo "::error::harness ref resolved to $HARNESS_SHA, not the pin $RE_HARNESS_REF"; exit 1
+            fi
+            git checkout "$HARNESS_SHA" -- docs/re/scripts docs/re/evidence
+            echo "harness: materialised from $HARNESS_SHA (pinned commit, not a branch tip)"
+          fi
+          echo "HARNESS_MODE=$HARNESS_MODE" >> "$GITHUB_ENV"
+          echo "HARNESS_SHA=$HARNESS_SHA" >> "$GITHUB_ENV"
+          # Replace the placeholder pair IN PLACE: appending left a stale
+          # `harness sha unknown` above the resolved one, and every first-match
+          # reader -- including the artifact verification script -- took the stale
+          # value.
+          sed -i -E \
+            -e "s|^harness sha .*|harness sha       $HARNESS_SHA|" \
+            -e "s|^harness mode .*|harness mode      $HARNESS_MODE|" \
+            "$ART/provenance.txt"
+          if [ "${{ matrix.kind }}" = "guards" ]; then
+            test -f docs/re/scripts/lib-re.sh
+            test -f docs/re/evidence/A.jsonl
+            test -f docs/re/evidence/differential.json
+          fi
+
+      # ── 0004: the spec artifact and the test that guards it ───────────────
+      - name: Toolchain (Rust)
+        if: matrix.branch == github.ref_name && (matrix.kind == 'openapi' || matrix.kind == 'unit')
+        uses: dtolnay/rust-toolchain@stable
+
+      - if: matrix.branch == github.ref_name && (matrix.kind == 'openapi' || matrix.kind == 'unit')
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Namespaced: ci.yml's jobs compile the same crate with different
+          # RUSTFLAGS/feature sets, and sharing a target dir across those only
+          # costs rebuild time.
+          prefix-key: re-gate-v1
+
+      - name: Regenerate the OpenAPI spec (utoipa artefact)
+        if: matrix.branch == github.ref_name && matrix.kind == 'openapi'
+        # Same command as ci.yml's openapi-spec-drift job (`just gen-openapi-schema`).
+        run: cargo run --features dev_tools --bin generate-openapi
+
+      - name: Spec drift — the committed spec must be the fresh generator output
+        if: matrix.branch == github.ref_name && matrix.kind == 'openapi'
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code resources/gen/openapi.json; then
+            echo "::error::resources/gen/openapi.json drifted: the committed artifact is not the fresh generator output. Run \`just gen-openapi\` and commit the result."
+            exit 1
+          fi
+
+      - name: The artifact test — the committed spec declares /api/setup's errors
+        if: matrix.branch == github.ref_name && matrix.kind == 'openapi'
+        run: |
+          set -euo pipefail
+          mkdir -p "$ART"
+          cargo test --lib -- setup_openapi_contract 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee "$ART/openapi-artifact-test.log"
+          # Non-vacuous: the two tests must have been RUN and passed, not filtered out.
+          for t in committed_spec_declares_the_setup_contract setup_admin_attribute_declares_the_contract; do
+            grep -q "^test .*$t \.\.\. ok$" "$ART/openapi-artifact-test.log" \
+              || { echo "::error::$t did not run green — the artifact is unguarded"; exit 1; }
+          done
+          grep -q '^test result: ok\.' "$ART/openapi-artifact-test.log"
+
+      # ── the frontend throw-shape oracle ──────────────────────────────────
+      - name: Node (for vitest)
+        if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26.3.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
+        working-directory: frontend
+        run: npm ci
+
+      - name: Scoped vitest run — the SDK error-shape throw oracle
+        if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
+        working-directory: frontend
+        env:
+          # The runner gives each step a TTY, so vitest keeps its colour even
+          # through `| tee` — unlike the sandbox, where the capture was a plain
+          # redirect and the summary line was bare text. The assertions below
+          # grep that summary literally, so the artifact is forced plain here:
+          # no colour, and any escape that survives is stripped on the way in.
+          # (First real run failed on this: "Test Files  1 passed (1)" was
+          # present but wrapped in \x1b[2m / \x1b[1m\x1b[32m, so `grep -q
+          # 'Test Files *1 passed'` matched nothing and the leg was reported as
+          # "did not run as one passing file" while all 27 tests had passed.)
+          NO_COLOR: "1"
+          FORCE_COLOR: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p "$ART"
+          npx vitest run --reporter=verbose src/lib/api/endpoints/auth.test.ts 2>&1 \
+            | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+            | tee "$ART/frontend-vitest.txt"
+
+      - name: Assert the three shape tests ran green (not vacuous)
+        if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
+        run: |
+          set -euo pipefail
+          log=$ART/frontend-vitest.txt
+          grep -q 'Test Files *1 passed' "$log" || { echo "::error::auth.test.ts did not run as one passing file"; exit 1; }
+          for name in 'setupAdmin handles the body-only throw shape' \
+                      'setupAdmin renders the text/plain body instead of' \
+                      'a bare-string throw through apiErrorFromSdkError is not a NetworkError'; do
+            grep -qF "$name" "$log" || { echo "::error::the shape test '$name' did not run — the file's whole point is missing"; exit 1; }
+          done
+          n=$(grep -oE 'Tests +[0-9]+ passed' "$log" | grep -oE '[0-9]+' | tail -1)
+          [ "${n:-0}" -ge 27 ] || { echo "::error::only ${n:-0} tests passed (delivered evidence: 27)"; exit 1; }
+          echo "OK — $n tests passed, the three shape tests included"
+
+      # ── the 4xx wire-byte oracle ─────────────────────────────────────────
+      - name: The byte-length oracle for ErrorResponse
+        if: matrix.branch == github.ref_name && matrix.kind == 'unit'
+        run: |
+          set -euo pipefail
+          mkdir -p "$ART"
+          cargo test --lib -- error_response 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee "$ART/error-byte-oracle.log"
+          grep -q "^test .*error_response_length_oracle \.\.\. ok$" "$ART/error-byte-oracle.log" \
+            || { echo "::error::error_response_length_oracle did not run green"; exit 1; }
+          grep -q '^test result: ok\.' "$ART/error-byte-oracle.log"
+
+      # ── the RE document's own guards ─────────────────────────────────────
+      - name: Guard 1 — the committed differential must be a fresh default run
+        if: matrix.branch == github.ref_name && matrix.kind == 'guards'
+        run: python3 docs/re/scripts/diff-builds.py --check docs/re/evidence/differential.json
+
+      - name: Guard 2 — section C must be the generated text, byte for byte
+        if: matrix.branch == github.ref_name && matrix.kind == 'guards'
+        run: |
+          set -euo pipefail
+          mkdir -p "$ART"
+          python3 docs/re/scripts/gen-section-c.py "$ART/section-c.gen.md"
+          python3 - "$ART/section-c.gen.md" docs/re/runtime-evidence.md <<'PY'
+          import sys
+          gen = open(sys.argv[1]).read()
+          doc = open(sys.argv[2]).read()
+          if gen not in doc:
+              print('::error::docs/re/runtime-evidence.md no longer contains the text '
+                    'gen-section-c.py generates from docs/re/evidence/differential.json '
+                    '(the generator output is %d bytes and is not a verbatim block of the '
+                    'document). Regenerate the section and commit it.' % len(gen))
+              raise SystemExit(1)
+          print('OK — the generated section is a verbatim block of runtime-evidence.md (%d bytes)' % len(gen))
+          PY
+
+      - name: Guard 3 — citation check negative control (must FAIL as expected)
+        if: matrix.branch == github.ref_name && matrix.kind == 'guards'
+        run: |
+          set -euo pipefail
+          mkdir -p "$ART"
+          # A green citation check means nothing until you have seen it go red for
+          # the right reason: flip ONE cited status in a /tmp mirror of the
+          # committed evidence (c1's `t21-req4` 400 -> 429, i.e. the row that says
+          # "a 429 does not extend the deadline"), run the same generator, and
+          # require the run to die on that exact citation. The step passes only
+          # when the mirror run fails.
+          mirror=$CI_ROOT/negctl
+          rm -rf "$mirror"; mkdir -p "$mirror/docs/re"
+          cp -R docs/re/scripts docs/re/evidence "$mirror/docs/re/"
+          python3 - "$mirror/docs/re/evidence/apv-c1-setupdeadline.jsonl" <<'PY'
+          import json, sys
+          path = sys.argv[1]
+          recs = [json.loads(l) for l in open(path) if l.strip()]
+          for r in recs:
+              if r['case_id'] == 'setup-deadline-on-c1':
+                  for s in r['steps']:
+                      if s['name'] == 't21-req4':
+                          s['response']['status'] = 429   # the pre-patch re-arming value
+          with open(path, 'w') as fh:
+              for r in recs:
+                  fh.write(json.dumps(r, sort_keys=True) + '\n')
+          PY
+          set +e
+          out=$( cd "$mirror" && python3 docs/re/scripts/gen-section-c.py "$ART/negctl.section-c.md" 2>&1 )
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          if [ "$rc" = 0 ]; then
+            echo "::error::the negative control PASSED: verify_citations() did not notice t21-req4 being flipped to 429, so it cannot be trusted to notice a real citation drift."
+            exit 1
+          fi
+          printf '%s' "$out" | grep -q 'CITATION ASSERTION FAILED' \
+            || { echo "::error::the mirror run failed (rc=$rc) but not with the citation assertion — the guard is broken for a different reason."; exit 1; }
+          test ! -f "$ART/negctl.section-c.md" \
+            || { echo "::error::the mirror run wrote its output despite failing the citation check"; exit 1; }
+          echo "OK — the negative control failed exactly as required (rc=$rc, citation assertion fired, no output written)"
+
+      - name: Collect the run's evidence
+        if: always() && matrix.branch == github.ref_name
+        run: |
+          set +e
+          mkdir -p "$ART"
+          ls -la "$ART"
+          exit 0
+
+      - name: Upload the evidence
+        if: always() && matrix.branch == github.ref_name
+        uses: actions/upload-artifact@v4
+        with:
+          name: re-gate-static-${{ matrix.kind }}
+          path: /tmp/re-gate/artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # One required check for branch protection, and the non-vacuity net: a push
+  # to any of the seven branches runs exactly one leg, a run started on some
+  # other ref must fail rather than report green with nothing executed.
+  # ═══════════════════════════════════════════════════════════════════════════
+  re-gate-required:
+    name: RE gate (required)
+    needs: [re-gate-behaviour, re-gate-static]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: This ref must be one of the seven delivery branches
+        run: |
+          set -euo pipefail
+          case '${{ github.ref_name }}' in
+            fix/limiter-window|feat/setup-budget|fix/trusted-proxy-xff|docs/setup-openapi|fix/spa-error-shapes|test/error-byte-oracle|docs/behavioral-re)
+              echo "OK — ${{ github.ref_name }} is a delivery branch" ;;
+            *)
+              echo "::error::'${{ github.ref_name }}' has no scoped case list in re-gate.yml, so no behavioural leg ran and a green run would be vacuous. Add it to the matrix or dispatch on a delivery branch."
+              exit 1 ;;
+          esac
+
+      - name: The legs that ran must not have failed
+        run: |
+          set -euo pipefail
+          for j in "${{ needs.re-gate-behaviour.result }}" "${{ needs.re-gate-static.result }}"; do
+            case "$j" in
+              success|skipped) ;;
+              *) echo "::error::a RE gate leg reported '$j'"; exit 1 ;;
+            esac
+          done
+          echo "OK — behaviour=${{ needs.re-gate-behaviour.result }} static=${{ needs.re-gate-static.result }}"
