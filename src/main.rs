@@ -968,14 +968,29 @@ async fn run(config: common::config::AppConfig) -> Result<(), Box<dyn std::error
             rl.refresh_window_secs,
             100_000,
         ));
+        // POLICY (patch 0002): `/api/setup` is the one-time first-run wizard, so
+        // it gets its OWN instance and therefore its own budget. Handing it
+        // `register_limiter` (the previous wiring) meant one budget covered both
+        // endpoints: a burst of registrations — or a bot probing
+        // `/api/auth/register` — exhausted the 5/3600 budget and locked the
+        // operator out of first-run setup, and a mistyped setup attempt spent
+        // registration budget. Same default numbers as register, so an untouched
+        // deployment sees no change in how much traffic each allows.
+        let setup_limiter = Arc::new(RateLimiter::new(
+            rl.setup_max_requests,
+            rl.setup_window_secs,
+            100_000,
+        ));
         tracing::info!(
-            "Rate limiting enabled — login: {}/{} s, register: {}/{} s, refresh: {}/{} s",
+            "Rate limiting enabled — login: {}/{} s, register: {}/{} s, refresh: {}/{} s, setup: {}/{} s",
             rl.login_max_requests,
             rl.login_window_secs,
             rl.register_max_requests,
             rl.register_window_secs,
             rl.refresh_max_requests,
             rl.refresh_window_secs,
+            rl.setup_max_requests,
+            rl.setup_window_secs,
         );
 
         // Auth routes split by rate-limit policy
@@ -1070,10 +1085,15 @@ async fn run(config: common::config::AppConfig) -> Result<(), Box<dyn std::error
         let opaque_params_public =
             oxicloud::interfaces::api::handlers::opaque_auth_handler::opaque_params_routes()
                 .with_state(app_state.clone());
-        // One-time setup route — public, rate-limited like register
+        // One-time setup route — public, and rate-limited from its OWN budget
+        // (`setup_limiter`), not register's: see the POLICY note above. The
+        // middleware wrapper is `rate_limit_register` because that is the layer
+        // the module exports for a POST-budget pair; the limiter instance is
+        // what decides the budget, and the warning line it emits on a 429 names
+        // the endpoint `register`.
         let setup_router = setup_route()
             .layer(axum::middleware::from_fn_with_state(
-                register_limiter.clone(),
+                setup_limiter.clone(),
                 rate_limit_register,
             ))
             .with_state(app_state.clone());
