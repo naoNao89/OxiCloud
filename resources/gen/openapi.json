@@ -13510,7 +13510,7 @@
           "auth"
         ],
         "summary": "One-time endpoint to create the first admin user.",
-        "description": "Available only when the system is not yet initialized (no admin exists).\nOnce the admin is created the endpoint permanently returns 403.\nUses an atomic \"claim\" operation so concurrent requests cannot both succeed.",
+        "description": "Available only when the system is not yet initialized (no admin exists).\nOnce the admin is created the endpoint permanently returns 403.\nUses an atomic \"claim\" operation so concurrent requests cannot both succeed.\n\nStatuses, and where each one comes from:\n* 201 — the admin was created; body is the new `PublicUserDto`.\n* 400 — `setup_create_admin` rejected the input: username outside 3..=254\n  characters, password shorter than `min_password_length`, or an email\n  `User::new` refuses (all `ErrorKind::InvalidInput` → `ApiErrorBody`).\n  A body that is not even JSON is rejected earlier by the `Json` extractor\n  with a 400 whose body is plain text, not `ApiErrorBody`.\n* 403 — the system is already initialized (the pre-check, or losing the\n  atomic claim).\n* 429 — the rate-limit middleware in front of this route (`main.rs`), not\n  this handler; `Retry-After` carries the wait in seconds.\n* 503 — no auth service / no admin-settings service is wired.\n\nThe spec this feeds (`resources/gen/openapi.json`) is a checked-in build\nartifact: after editing this attribute, regenerate it with `just gen-openapi`\n— `cargo run --features dev_tools --bin generate-openapi`, then\n`cd frontend && npm run gen:openapi` for the SDK.",
         "operationId": "setup_admin",
         "requestBody": {
           "content": {
@@ -13533,8 +13533,28 @@
               }
             }
           },
+          "400": {
+            "description": "Validation rejected the body: username length, password length, or email format (ApiErrorBody)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "System already initialized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited by the setup route's rate-limit middleware (not this handler) — the Retry-After header carries the wait (ApiErrorBody)",
             "content": {
               "application/json": {
                 "schema": {

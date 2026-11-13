@@ -1308,13 +1308,33 @@ pub struct BackchannelLogoutForm {
 /// Available only when the system is not yet initialized (no admin exists).
 /// Once the admin is created the endpoint permanently returns 403.
 /// Uses an atomic "claim" operation so concurrent requests cannot both succeed.
+///
+/// Statuses, and where each one comes from:
+/// * 201 — the admin was created; body is the new `PublicUserDto`.
+/// * 400 — `setup_create_admin` rejected the input: username outside 3..=254
+///   characters, password shorter than `min_password_length`, or an email
+///   `User::new` refuses (all `ErrorKind::InvalidInput` → `ApiErrorBody`).
+///   A body that is not even JSON is rejected earlier by the `Json` extractor
+///   with a 400 whose body is plain text, not `ApiErrorBody`.
+/// * 403 — the system is already initialized (the pre-check, or losing the
+///   atomic claim).
+/// * 429 — the rate-limit middleware in front of this route (`main.rs`), not
+///   this handler; `Retry-After` carries the wait in seconds.
+/// * 503 — no auth service / no admin-settings service is wired.
+///
+/// The spec this feeds (`resources/gen/openapi.json`) is a checked-in build
+/// artifact: after editing this attribute, regenerate it with `just gen-openapi`
+/// — `cargo run --features dev_tools --bin generate-openapi`, then
+/// `cd frontend && npm run gen:openapi` for the SDK.
 #[utoipa::path(
     post,
     path = "/api/setup",
     request_body = SetupAdminDto,
     responses(
         (status = 201, description = "First admin created and system initialized", body = PublicUserDto),
+        (status = 400, description = "Validation rejected the body: username length, password length, or email format (ApiErrorBody)", body = crate::interfaces::errors::ApiErrorBody),
         (status = 403, description = "System already initialized", body = crate::interfaces::errors::ApiErrorBody),
+        (status = 429, description = "Rate limited by the setup route's rate-limit middleware (not this handler) — the Retry-After header carries the wait (ApiErrorBody)", body = crate::interfaces::errors::ApiErrorBody),
         (status = 503, description = "Auth service not configured", body = crate::interfaces::errors::ApiErrorBody),
     ),
     tag = "auth"
