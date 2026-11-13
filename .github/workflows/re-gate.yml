@@ -112,6 +112,15 @@ env:
   #    container. Trust auth on a loopback-only throwaway container: there is no
   #    credential value anywhere, and the DSN in run-<label>/env.sh keeps the
   #    harness's literal `RE_PGPASS` placeholder.
+  # The branch binary is a plain `cargo build` (dev, default features: NO
+  # bundled-assets), so it resolves its static source on disk
+  # (src/interfaces/web/mod.rs:58) and then requires <static_path>/locales
+  # (src/main.rs:570). The harness launches the app from a scratch run dir
+  # (lib-re.sh: `cd "$run"`), so the default `./static` does not exist there and
+  # the branch arm panics at boot -- while the released arm boots fine from its
+  # embedded corpus, which is exactly why only the branch arm failed. Point the
+  # app at the checkout's real assets.
+  OXICLOUD_STATIC_PATH: ${{ github.workspace }}/frontend/static
   # RE_PG_PORT is deliberately NOT set here: the postgres service's host port is
   # assigned by the runner and exported from job.services in the behaviour job's
   # first step. A fixed 55432 collided with an outside occupant twice in ~40 jobs.
