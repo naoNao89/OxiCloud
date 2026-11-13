@@ -13951,9 +13951,17 @@ export type SetupAdminData = {
 
 export type SetupAdminErrors = {
     /**
+     * Validation rejected the body: username length, password length, or email format (ApiErrorBody)
+     */
+    400: ApiErrorBody;
+    /**
      * System already initialized
      */
     403: ApiErrorBody;
+    /**
+     * Rate limited by the setup route's rate-limit middleware (not this handler) — the Retry-After header carries the wait (ApiErrorBody)
+     */
+    429: ApiErrorBody;
     /**
      * Auth service not configured
      */
