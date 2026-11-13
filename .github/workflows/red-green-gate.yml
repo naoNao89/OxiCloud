@@ -103,6 +103,30 @@ jobs:
           m = json.load(open("docs/re/red-green/manifest.json"))
           for e in m["branches"]:
               if e["branch"] == want:
+                  # Every value below is interpolated into a bash command as a GitHub
+                  # expression, so its SHAPE is enforced rather than hoped for. Two
+                  # demonstrated bypasses motivate this: an empty test_path makes the
+                  # identity step compare nothing and exit 0 (silently certifying any
+                  # transition), and a value carrying `;` executes shell inside the gate —
+                  # the quote check further down does not catch that, because `;` needs no
+                  # quote to end a statement.
+                  import re as _re
+                  shapes = {"red": r"[0-9a-f]{40}", "green": r"[0-9a-f]{40}",
+                            "test_path": r"[A-Za-z0-9._/+@\[\]()-]+", "test_target": r"[A-Za-z0-9._-]*",
+                            "filter": r"[A-Za-z0-9_:]*", "kind": r"(rust|integration|frontend)",
+                            # The markers are assertion text, so the class is permissive — but it
+                            # excludes a newline (grep -F splits patterns on it, and an empty first
+                            # pattern matches every line) and forbids a leading dash (grep would read
+                            # the value as an OPTION and exit 0 without opening the log). Both were
+                            # executed against an earlier revision and both were accepted, silently.
+                            "expect_red": r'(?!-)[^\n"`$\\]+', "expect_green": r'(?!-)[^\n"`$\\]+'}
+                  for sk, pat in shapes.items():
+                      sv = str(e.get(sk, ""))
+                      if not _re.fullmatch(pat, sv):
+                          raise SystemExit("manifest %s=%r does not have the required shape %s — it is substituted into a shell command, so the shape is enforced, not assumed" % (sk, sv, pat))
+                  for sk in ("test_path", "expect_red", "expect_green"):
+                      if not str(e.get(sk, "")).strip():
+                          raise SystemExit("the %s entry has an empty %s — the check that reads it would be vacuous" % (want, sk))
                   for k in ("red", "green", "test_path", "test_target", "filter", "expect_red", "expect_green", "kind"):
                       v = e.get(k, "")   # test_target is only meaningful for kind=integration
                       if "\n" in v:
@@ -169,60 +193,49 @@ jobs:
         run: |
           set -euo pipefail
           red="${{ steps.m.outputs.red }}"; kind="${{ matrix.kind }}"; head="${{ github.sha }}"
-          # The mission's step 8 is about the DELIVERED state, not only the historical fix
-          # commit: a later commit could re-touch the test or the code and the gate would
-          # not notice. So the frozen test is compared against BOTH — the fix commit (the
-          # causal transition) and the pushed HEAD (what is actually being delivered).
-          for path in ${{ steps.m.outputs.test_path }}; do
-            for target in "${{ steps.m.outputs.green }}" "$head"; do
+          filter="${{ steps.m.outputs.filter }}"
+          # WHOLE-FILE comparison, unconditionally. Every manifest entry names a file that is
+          # entirely tests (a sibling tests.rs, the frontend test file, tests/…), so this is
+          # sound: no region extraction, no inference from content, and nothing a test-only file
+          # could contain can weaken it. The earlier region heuristic — which an auditor defeated
+          # twice, and which would have let a `tests.rs` carrying a nested cfg marker slip back to
+          # a partial comparison — is gone with the inline modules that required it.
+          test_path="${{ steps.m.outputs.test_path }}"
+          [ -n "$test_path" ] \
+            || { echo "::error::the manifest entry has an empty test_path — the loop below would compare nothing and exit 0, which is exactly how a forged transition gets certified"; exit 1; }
+          for target in "${{ steps.m.outputs.green }}" "$head"; do
+            case "$kind" in frontend) gp="frontend/$test_path" ;; *) gp="$test_path" ;; esac
+            git cat-file -e "$red:$gp" 2>/dev/null \
+              || { echo "::error::$gp is not a file at $red — check the manifest path (frontend-relative for kind=frontend, repo-relative otherwise)"; exit 1; }
+            # Existence and diff are BLOB comparisons. For a symlink the blob is the link TEXT, so
+            # a symlink at test_path would be "frozen" while the file the compiler actually reads
+            # (its target) was rewritten — demonstrated: 30 assertions commented out behind a link,
+            # identity, ancestry, declaration and all three legs green. Modes 100644/100755 only.
+            mode="$(git ls-tree "$red" -- "$gp" | cut -d' ' -f1)"
+            case "$mode" in 100644|100755) ;; *) { echo "::error::$gp is not a regular file at $red (mode ${mode:-none}) — a symlink or gitlink is compared as its link text, which freezes nothing"; exit 1; } ;; esac
+            git diff --quiet "$red" "$target" -- "$gp" \
+              || { echo "::error::$gp differs between $red and $target"; git diff --stat "$red" "$target" -- "$gp"; exit 1; }
+            # The filter must name a declaration in THAT file, so a decoy path cannot be frozen
+            # while the real test is weakened elsewhere. Rust and integration entries only: a
+            # frontend entry has no filter — Vitest selects by path — so applying the grep to it
+            # would match nothing and fail the step before the runner ever started.
+            if [ "$kind" != "frontend" ]; then
+              [ -n "$filter" ] \
+                || { echo "::error::kind=$kind needs a non-empty filter (its legs run cargo test -- <filter>)"; exit 1; }
               if [ "$kind" = "integration" ]; then
-                # A separate test file, repo-relative: whole-file identity, no prefix.
-                gp="$path"
-                git cat-file -e "$red:$gp" 2>/dev/null \
-                  || { echo "::error::$gp is not a file at $red"; exit 1; }
-                git diff --quiet "$red" "$target" -- "$gp" \
-                  || { echo "::error::$gp differs between the test-only commit and $target"; git diff --stat "$red" "$target" -- "$gp"; exit 1; }
-                echo "OK — $gp byte-identical at $red and $target (sha256 $(git show "$target:$gp" | sha256sum | cut -c1-16)…)"
-              elif [ "$kind" = "frontend" ]; then
-                gp="frontend/$path"
-                git cat-file -e "$red:$gp" 2>/dev/null \
-                  || { echo "::error::$gp is not a file at $red — check the manifest path (it must be frontend-relative)"; exit 1; }
-                git diff --quiet "$red" "$target" -- "$gp" \
-                  || { echo "::error::$gp differs between the test-only commit and $target"; git diff --stat "$red" "$target" -- "$gp"; exit 1; }
-                echo "OK — $gp byte-identical at $red and $target (sha256 $(git show "$target:$gp" | sha256sum | cut -c1-16)…)"
-              else
-                # The region must start at the FIRST test-gated attribute of ANY spelling —
-                # `#[cfg(test)]`, `#[cfg(all(test, unix))]`, … An auditor bypassed the exact-
-                # spelling version by weakening an assertion in a test module declared above
-                # the `#[cfg(test)]` line: the region stayed byte-identical while the test was
-                # gutted.
-                for c in "$red" "$target"; do
-                  # A literal regex in the awk program: `-v m='…\[cfg…'` loses the backslashes
-                  # (awk processes escapes in -v values), turning the marker into a character
-                  # class that matches nothing — caught by re-running the extraction here.
-                  # The pattern admits `#[cfg(test)]`, `#[cfg(all(test, …))]`, `#[cfg(any(test, …))]`
-                  # and `#![cfg(test)]`, and REJECTS `#[cfg(not(test))]` and
-                  # `#[cfg(feature = "test-…")]`: an auditor showed those made the region start
-                  # above production code, turning a legitimate pair into a false refusal.
-                  git show "$c:$path" | awk '/^#!?\[cfg\((all\(|any\()?test[^a-z]/ {f=1} f' > "/tmp/region.$c"
-                  [ -s "/tmp/region.$c" ] \
-                    || { echo "::error::no test-gated region found in $path at $c"; exit 1; }
-                  # The filter must be a DECLARATION inside the region — `fn <name>` or the module
-                  # that contains it (`mod <name>…`) — not a substring a comment can satisfy: naming
-                  # a decoy file whose module merely *mentions* the test in a comment left the real
-                  # test unfrozen. One branch's filter names a module rather than a function, so both
-                  # forms are accepted. (Advisory, not a proof — see "What this gate does NOT prove".)
-                  grep -qE "(fn|mod) +${{ steps.m.outputs.filter }}" "/tmp/region.$c" \
-                    || { echo "::error::the manifest's filter ('${{ steps.m.outputs.filter }}') is neither a fn nor a mod declaration inside $path's test region at $c"; exit 1; }
-                done
-                if ! cmp -s "/tmp/region.$red" "/tmp/region.$target"; then
-                  echo "::error::the test region of $path differs between the test-only commit and $target"
-                  diff -u "/tmp/region.$red" "/tmp/region.$target" | head -40 || true
-                  exit 1
-                fi
-                echo "OK — the whole #[cfg(test)] region of $path is byte-identical at $red and $target ($(wc -l < "/tmp/region.$red" | tr -d ' ') lines, sha256 $(sha256sum < "/tmp/region.$red" | cut -c1-16)…)"
+                # The integration legs compile `--test <test_target>`; if test_path named any other
+                # file, freezing it would prove nothing about the test that ran (executed: a decoy
+                # tests/frozen_decoy.rs satisfied the declaration grep while the real target changed).
+                [ "$gp" = "tests/${{ steps.m.outputs.test_target }}.rs" ] \
+                  || { echo "::error::kind=integration with test_path=$gp but test_target=${{ steps.m.outputs.test_target }} — test_path must be tests/<test_target>.rs, the file cargo actually compiles"; exit 1; }
               fi
-            done
+              # Line-anchored so a COMMENT cannot satisfy it: an unanchored `(fn|mod) +name`
+              # matched `// fn name` (demonstrated), which let the frozen file contain no test
+              # at all while the real failing test lived elsewhere.
+              grep -qE "^[[:space:]]*(#\[[^]]*\][[:space:]]*)*(pub(\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+${filter}[(]|^[[:space:]]*mod[[:space:]]+${filter}[ ;{]" <(git show "$target:$gp") \
+                || { echo "::error::the filter ('$filter') is not a fn or mod DECLARATION inside $gp (a mention in a comment does not count)"; exit 1; }
+            fi
+            echo "OK — $gp byte-identical at $red and $target (sha256 $(git show "$target:$gp" | sha256sum | cut -c1-16)...)"
           done
 
       - name: Toolchain (Rust legs)
@@ -257,11 +270,34 @@ jobs:
           fi
           grep -qE '^test result: FAILED|^failures:' /tmp/red.log \
             || { echo "::error::no test-failure marker in the log; the run may have been filtered to nothing"; exit 1; }
-          grep -qF "${{ steps.m.outputs.expect_red }}" /tmp/red.log \
+          grep -qF -- "${{ steps.m.outputs.expect_red }}" /tmp/red.log \
             || { echo "::error::the failure does not carry the expected assertion text"; echo "expected: ${{ steps.m.outputs.expect_red }}"; exit 1; }
-          grep -qE "running [0-9]+ tests?" /tmp/red.log \
-            || { echo "::error::the test binary did not report running any test — a filtered-to-nothing run cannot be RED"; exit 1; }
-          echo "OK — RED: the named assertion failed on the unpatched tree, and it was the assertion that failed"
+          grep -qE "running [1-9][0-9]* tests?" /tmp/red.log \
+            || { echo "::error::the test binary did not report running a test — a filtered-to-nothing run cannot be RED"; exit 1; }
+          # The frozen file must be the module that FAILED. `grep -F "$test_path"` was not enough:
+          # any line carrying the path satisfies it (a compiler warning naming an unused item in a
+          # decoy file did), while a legitimate RED whose panic surfaces in a helper or in
+          # production code was refused. The panic line names the failing test's own module, which
+          # no diagnostic produces — verified present in the real RED logs of all three Rust
+          # branches. A RED that cannot panic at all (an abort, or a #[should_panic] that does not
+          # panic) is refused by design; see the README's limits.
+          test_path="${{ steps.m.outputs.test_path }}"
+          modpath="$(printf '%s' "${test_path#src/}" | sed -e 's/\.rs$//' -e 's#/#::#g')"
+          # BOTH facts from the same line, matched as FIXED strings so no path character can be
+          # read as a regex (a `+` or `(` in test_path would otherwise change or break the pattern):
+          # the failing test's module, and the file it panicked in. The module alone is not enough —
+          # a `#[path = "..."] mod` moves the compiled file without renaming the module, so a frozen
+          # decoy could be byte-identical while the real test body was rewritten (executed). The path
+          # alone is not enough either — any diagnostic line naming the path satisfied it. Price,
+          # stated: a RED whose panic surfaces in a helper or in production code is refused.
+          grep -F -- "thread '${modpath}::" /tmp/red.log | grep -qF -- "panicked at $test_path:" \
+            || { echo "::error::no panic from the frozen file's module ($modpath) inside $test_path — the log must show WHICH test failed, in the file that is frozen (a #[path] declaration that moves the module's file is not supported)"; exit 1; }
+          # The freeze compares the COMMITTED blob; a build script runs before rustc reads the
+          # sources, so it can rewrite the working-tree file and leave every hash matching while
+          # the compiled test differs (executed). Nothing tracked may change during a leg.
+          git diff --quiet -- "$test_path" \
+            || { echo "::error::the working tree changed during this leg — a build script or process rewrote a tracked file, so the frozen blob is not what was compiled"; git diff --stat | head -5; exit 1; }
+          echo "OK — RED: the named assertion failed on the unpatched tree, in the frozen file's module, and it was the assertion that failed"
 
       - name: RED leg — the test must fail on the unpatched tree (frontend)
         if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
@@ -286,11 +322,18 @@ jobs:
           if grep -qE 'Cannot find module|Transform failed|SyntaxError|type error TS[0-9]+' /tmp/red.log; then
             echo "::error::the RED failure is a build/compile error, not the assertion"; exit 1
           fi
-          grep -qF "${{ steps.m.outputs.expect_red }}" /tmp/red.log \
+          grep -qF -- "${{ steps.m.outputs.expect_red }}" /tmp/red.log \
             || { echo "::error::the failure does not carry the expected assertion text"; exit 1; }
           grep -qE 'Tests +[0-9]+ failed' /tmp/red.log \
             || { echo "::error::no failing-test summary in the log"; exit 1; }
-          echo "OK — RED: the named assertion failed on the unpatched tree"
+          test_path="${{ steps.m.outputs.test_path }}"
+          # Vitest prints a shortened path, so the basename is the tie (the same decoy attack
+          # the Rust leg guards against applies here).
+          grep -qF -- "$(basename "$test_path")" /tmp/red.log \
+            || { echo "::error::the RED log does not name the frozen test file ($test_path)"; exit 1; }
+          git diff --quiet -- "$test_path" \
+            || { echo "::error::the working tree changed during this leg — a process rewrote a tracked file, so the frozen blob is not what was compiled"; git diff --stat | head -5; exit 1; }
+          echo "OK — RED: the named assertion failed on the unpatched tree, in the frozen file"
 
       # ── GREEN: the same test, same file, on the fix ────────────────────────
       - name: GREEN leg — the same test must pass on the fix
@@ -301,8 +344,18 @@ jobs:
           cargo test --lib -- "${{ steps.m.outputs.filter }}" 2>&1 | tee /tmp/green.log
           grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/green.log \
             || { echo "::error::GREEN did not report a passing test result"; exit 1; }
-          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/green.log \
+          test_path="${{ steps.m.outputs.test_path }}"
+          modpath="$(printf '%s' "${test_path#src/}" | sed -e 's/\.rs$//' -e 's#/#::#g')"
+          # The SAME test must pass, not merely some test matching the filter: without this a fix
+          # could disable the frozen module and leave a same-named stub elsewhere, and the gate
+          # would still print "the same test passes" (executed). Fixed strings, so a path character
+          # such as `+` or `(` cannot be read as a regex.
+          grep -F -- "test ${modpath}::" /tmp/green.log | grep -qF -- "... ok" \
+            || { echo "::error::no passing test from the frozen file's module ($modpath) — a stub under the same filter is not the frozen test"; exit 1; }
+          grep -qF -- "${{ steps.m.outputs.expect_green }}" /tmp/green.log \
             || { echo "::error::the expected passing line is absent"; exit 1; }
+          git diff --quiet -- "$test_path" \
+            || { echo "::error::the working tree changed during the GREEN leg — the frozen blob is not what was compiled"; git diff --stat | head -5; exit 1; }
           echo "OK — GREEN: the same test passes on the fix, with the file unchanged since RED"
 
       - name: GREEN leg — the same test must pass on the fix (frontend)
@@ -312,9 +365,12 @@ jobs:
           set -euo pipefail
           git checkout --detach "${{ steps.m.outputs.green }}"
           npx vitest run --reporter=verbose "${{ steps.m.outputs.test_path }}" 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee /tmp/green.log
+          test_path="${{ steps.m.outputs.test_path }}"
           grep -qE 'Test Files +[0-9]+ passed' /tmp/green.log || { echo "::error::GREEN did not report a passing file"; exit 1; }
-          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/green.log \
+          grep -qF -- "${{ steps.m.outputs.expect_green }}" /tmp/green.log \
             || { echo "::error::the expected passing line is absent"; exit 1; }
+          git diff --quiet -- "$test_path" \
+            || { echo "::error::the working tree changed during the GREEN leg — the frozen blob is not what was run"; git diff --stat | head -5; exit 1; }
           echo "OK — GREEN: the same test passes on the fix, with the file unchanged since RED"
 
       - name: HEAD leg — the same test must pass on the delivered HEAD (rust)
@@ -329,8 +385,14 @@ jobs:
           cargo test --lib -- "${{ steps.m.outputs.filter }}" 2>&1 | tee /tmp/head.log
           grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/head.log \
             || { echo "::error::the delivered HEAD does not report a passing test result"; exit 1; }
-          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/head.log \
+          test_path="${{ steps.m.outputs.test_path }}"
+          modpath="$(printf '%s' "${test_path#src/}" | sed -e 's/\.rs$//' -e 's#/#::#g')"
+          grep -F -- "test ${modpath}::" /tmp/head.log | grep -qF -- "... ok" \
+            || { echo "::error::no passing test from the frozen file's module ($modpath) on the delivered HEAD — a stub under the same filter is not the frozen test"; exit 1; }
+          grep -qF -- "${{ steps.m.outputs.expect_green }}" /tmp/head.log \
             || { echo "::error::the expected passing line is absent at HEAD"; exit 1; }
+          git diff --quiet -- "$test_path" \
+            || { echo "::error::the working tree changed during the HEAD leg — the frozen blob is not what was compiled"; git diff --stat | head -5; exit 1; }
           echo "OK — GREEN also holds on the delivered HEAD (${{ github.sha }}), not only on the historical fix commit"
 
       - name: HEAD leg — the same test must pass on the delivered HEAD (frontend)
@@ -340,10 +402,13 @@ jobs:
           set -euo pipefail
           git checkout --detach "${{ github.sha }}"
           npx vitest run --reporter=verbose "${{ steps.m.outputs.test_path }}" 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee /tmp/head.log
+          test_path="${{ steps.m.outputs.test_path }}"
           grep -qE 'Test Files +[0-9]+ passed' /tmp/head.log \
             || { echo "::error::the delivered HEAD did not report a passing file"; exit 1; }
-          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/head.log \
+          grep -qF -- "${{ steps.m.outputs.expect_green }}" /tmp/head.log \
             || { echo "::error::the expected passing line is absent at HEAD"; exit 1; }
+          git diff --quiet -- "$test_path" \
+            || { echo "::error::the working tree changed during the HEAD leg — the frozen blob is not what was run"; git diff --stat | head -5; exit 1; }
           echo "OK — GREEN also holds on the delivered HEAD (${{ github.sha }})"
 
       - name: RED leg — the live-HTTP regression must fail on the unpatched tree
@@ -358,6 +423,7 @@ jobs:
             || { echo "::error::OXICLOUD_TEST_DB_URL is unset — the integration test would SKIP and pass; failing closed"; exit 1; }
           git checkout --detach "${{ steps.m.outputs.red }}"
           cargo build --bin oxicloud            # the test spawns the real binary, so it must exist
+          test_path="${{ steps.m.outputs.test_path }}"
           set +e
           cargo test --test "${{ steps.m.outputs.test_target }}" -- "${{ steps.m.outputs.filter }}" --nocapture > /tmp/red.log 2>&1
           rc=$?
@@ -372,8 +438,14 @@ jobs:
           fi
           grep -qE '^test result: FAILED' /tmp/red.log \
             || { echo "::error::no test-failure marker in the log"; exit 1; }
-          grep -qF "${{ steps.m.outputs.expect_red }}" /tmp/red.log \
+          grep -qF -- "${{ steps.m.outputs.expect_red }}" /tmp/red.log \
             || { echo "::error::the failure does not carry the expected assertion text"; exit 1; }
+          # Same reasoning as the library leg: pin WHICH test failed, by its own thread name
+          # (libtest announces the failing test), rather than any line carrying the path.
+          grep -qE "thread '[^']*${{ steps.m.outputs.filter }}[^']*' .*panicked at" /tmp/red.log \
+            || { echo "::error::no panic from a test matching the filter '${{ steps.m.outputs.filter }}' — the log must show WHICH test failed"; exit 1; }
+          git diff --quiet -- "$test_path" \
+            || { echo "::error::the working tree changed during this leg — a build script or process rewrote a tracked file, so the frozen blob is not what was compiled"; git diff --stat | head -5; exit 1; }
           echo "OK — RED: the live-HTTP regression failed on the unpatched tree, and it was the assertion that failed"
 
       - name: GREEN leg — the same live regression must pass on the fix
@@ -385,13 +457,18 @@ jobs:
           git checkout --detach "${{ steps.m.outputs.green }}"
           cargo build --bin oxicloud
           cargo test --test "${{ steps.m.outputs.test_target }}" -- "${{ steps.m.outputs.filter }}" --nocapture 2>&1 | tee /tmp/green.log
+          test_path="${{ steps.m.outputs.test_path }}"
           if grep -qE '^SKIP' /tmp/green.log; then echo "::error::the test SKIPPED — a skip is not a pass"; exit 1; fi
           grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/green.log \
             || { echo "::error::GREEN did not report a passing test result"; exit 1; }
           # expect_green is a BEHAVIOURAL marker (the post-fix startup line), not the test
           # name: a skip reports the same summary line, so the name would not discriminate.
-          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/green.log \
+          grep -qE "^test [^ ]*${{ steps.m.outputs.filter }}[^ ]* \.\.\. ok" /tmp/green.log \
+            || { echo "::error::no passing test matching the filter '${{ steps.m.outputs.filter }}' — a stub is not the frozen test"; exit 1; }
+          grep -qF -- "${{ steps.m.outputs.expect_green }}" /tmp/green.log \
             || { echo "::error::the expected behavioural marker is absent — the run did not exercise the fixed wiring"; exit 1; }
+          git diff --quiet -- "$test_path" \
+            || { echo "::error::the working tree changed during the GREEN leg — the frozen blob is not what was compiled"; git diff --stat | head -5; exit 1; }
           echo "OK — GREEN: the same live-HTTP regression passes on the fix, with the test file unchanged since RED"
 
       - name: HEAD leg — the same live regression must pass on the delivered HEAD
@@ -403,11 +480,16 @@ jobs:
           git checkout --detach "${{ github.sha }}"
           cargo build --bin oxicloud
           cargo test --test "${{ steps.m.outputs.test_target }}" -- "${{ steps.m.outputs.filter }}" --nocapture 2>&1 | tee /tmp/head.log
+          test_path="${{ steps.m.outputs.test_path }}"
           if grep -qE '^SKIP' /tmp/head.log; then echo "::error::the test SKIPPED at HEAD — a skip is not a pass"; exit 1; fi
           grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/head.log \
             || { echo "::error::the delivered HEAD does not report a passing test result"; exit 1; }
-          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/head.log \
+          grep -qE "^test [^ ]*${{ steps.m.outputs.filter }}[^ ]* \.\.\. ok" /tmp/head.log \
+            || { echo "::error::no passing test matching the filter '${{ steps.m.outputs.filter }}' at HEAD"; exit 1; }
+          grep -qF -- "${{ steps.m.outputs.expect_green }}" /tmp/head.log \
             || { echo "::error::the expected behavioural marker is absent at HEAD"; exit 1; }
+          git diff --quiet -- "$test_path" \
+            || { echo "::error::the working tree changed during the HEAD leg — the frozen blob is not what was compiled"; git diff --stat | head -5; exit 1; }
           echo "OK — GREEN also holds on the delivered HEAD (${{ github.sha }})"
 
       - name: Summarise for the branch
@@ -426,6 +508,23 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: This ref must be one of the branches this gate defines
+        run: |
+          set -euo pipefail
+          # Without this guard, `workflow_dispatch` (or any push on a ref that carries the file
+          # but is not in the matrix) makes every leg take the "not this ref" path — conclusion
+          # success, 5 steps, one of which asserts nothing — and the tally below would then print
+          # OK on a run that proved nothing. GitHub attaches that green to the ref's SHA. An
+          # independent auditor demonstrated the reachability; the sibling RE gate already had
+          # the equivalent guard, and this one did not.
+          case '${{ github.ref_name }}' in
+            fix/limiter-window|feat/setup-budget|fix/trusted-proxy-xff|docs/setup-openapi|fix/spa-error-shapes)
+              echo "OK — ${{ github.ref_name }} is one of the five branches this gate covers" ;;
+            *)
+              echo "::error::'${{ github.ref_name }}' is not one of the gate's five branches, so no leg does any work and a green required check would be vacuous"
+              exit 1 ;;
+          esac
+
       - name: The legs that ran must not have failed, and the pushed ref's leg must have run
         run: |
           set -euo pipefail
