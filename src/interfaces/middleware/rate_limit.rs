@@ -180,3 +180,7 @@ pub async fn rate_limit_share_verify(
 }
 
 use axum::extract::State;
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)] #[rustfmt::skip] mod tests;
