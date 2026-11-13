@@ -92,10 +92,12 @@ pub struct ClientIpMakeSpan;
 
 impl<B> MakeSpan<B> for ClientIpMakeSpan {
     fn make_span(&mut self, request: &axum::http::Request<B>) -> Span {
-        // Borrow-only IP resolution: the span records `client_ip` via `%ip`
+        // Allocation-free IP resolution: the span records `client_ip` via `%ip`
         // (Display), so a `ClientIpDisplay` that renders straight into the
         // span's field storage avoids the per-request `String` the owned
-        // `client_ip()` allocated (benches/ROUND13.md §H2).
+        // `client_ip()` allocated (benches/ROUND13.md §H2). Same bytes as
+        // `client_ip()`, trusted-proxy rule included (the rightmost
+        // `X-Forwarded-For` hop that is not itself a trusted proxy).
         let ip = super::trusted_proxy::client_ip_display(request, true);
         let request_id = request
             .headers()
