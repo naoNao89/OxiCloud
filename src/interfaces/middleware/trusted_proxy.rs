@@ -7,10 +7,39 @@
 //! OXICLOUD_TRUST_PROXY_CIDR=127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,::1/128
 //! ```
 //!
-//! When the TCP peer address falls inside one of those CIDRs the leftmost
-//! entry of `X-Forwarded-For` (or `X-Real-Ip`) is used as the effective
-//! client IP.  When the peer is **not** trusted, or no proxy headers are
-//! present, the raw TCP peer address is returned.
+//! When the TCP peer address falls inside one of those CIDRs the effective
+//! client IP is the **rightmost `X-Forwarded-For` entry that is not itself a
+//! trusted proxy** — the last address in the chain that no proxy we trust could
+//! have appended. Walking from the right is what makes the value unforgeable: a
+//! proxy appends the peer it saw (`X-Forwarded-For: <client-supplied...>,
+//! <real client>`, nginx's default `$proxy_add_x_forwarded_for`), so every entry
+//! to the left of the rightmost untrusted hop is attacker-supplied text. Reading
+//! the **leftmost** entry instead — the previous behaviour — let any client pick
+//! its own rate-limit bucket, and pick a victim's address to lock that victim
+//! out.
+//!
+//! Entries are parsed and compared in normalised form, so `::ffff:203.0.113.9`
+//! and `203.0.113.9` are one client, and the resolved value is rendered
+//! canonically (`203.0.113.9`, `2001:db8::1`). An entry that is not a parseable
+//! IP is skipped, not fatal: junk can only appear in the attacker-supplied
+//! region, and a chain of junk still resolves to the peer.
+//!
+//! Resolution order (all of it gated on the peer being trusted — when it is not,
+//! or when there is no peer, the headers are ignored entirely):
+//! 1. `X-Forwarded-For`, right to left: the first entry that parses as an IP and
+//!    is not inside a trusted CIDR.
+//! 2. Otherwise `X-Real-Ip`, by the same rule (a single value; proxies overwrite
+//!    it rather than appending).
+//! 3. Otherwise the TCP peer itself.
+//!
+//! Step 3 is the "nothing identifies the client" case — an empty chain, a chain
+//! of nothing but trusted hops (which includes the legacy
+//! `OXICLOUD_TRUST_PROXY_HEADERS=1` trust-all mode, where every hop is inside
+//! `0.0.0.0/0`), or a chain of junk. Those deployments key the limiter on the
+//! proxy's address: one bucket for everyone. That is the honest answer for
+//! "cannot tell clients apart", but it is a shared bucket — a CIDR list that is
+//! narrower than the real proxy set, or a trust-all list, is a configuration
+//! bug whose symptom is 429s shared across unrelated clients.
 //!
 //! IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are automatically
 //! normalised to their IPv4 equivalent before CIDR lookup.
@@ -146,16 +175,52 @@ pub fn client_ip<B>(req: &Request<B>, include_port: bool) -> String {
     client_ip_from_parts(req.headers(), peer, include_port)
 }
 
-/// A resolved client-IP source that borrows from the request instead of
-/// allocating a `String`. [`std::fmt::Display`] renders it directly into the
-/// caller's buffer (the tracing span's field storage), so the per-request
-/// span factory no longer materializes an intermediate `String` on every
-/// request (benches/ROUND13.md §H2). Bytes rendered are identical to
+/// The address a trusted proxy reported for the client, or `None` when the
+/// presented chain does not identify one.
+///
+/// * `X-Forwarded-For` first, right to left: the first entry that parses as an
+///   IP and does not itself belong to a trusted proxy. Everything left of that
+///   entry is attacker-supplied (see the module docs), so it is only ever
+///   returned when nothing to its right qualified.
+/// * Then `X-Real-Ip` — a single value, overwritten by a proxy rather than
+///   appended — under the same rule: it is the client only if it is not itself
+///   a trusted proxy.
+///
+/// `None` is the answer for every chain that identifies nothing — absent,
+/// empty, all trusted hops, or nothing parseable — and each caller turns it
+/// into the peer fallback.
+fn forwarded_client_ip(headers: &axum::http::HeaderMap) -> Option<IpAddr> {
+    if let Some(raw) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+        && let Some(ip) = raw
+            .rsplit(',')
+            .filter_map(|entry| entry.trim().parse::<IpAddr>().ok())
+            .map(normalise)
+            .find(|ip| !is_trusted_proxy(*ip))
+    {
+        return Some(ip);
+    }
+
+    let xri: IpAddr = headers
+        .get("x-real-ip")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let xri = normalise(xri);
+    (!is_trusted_proxy(xri)).then_some(xri)
+}
+
+/// A resolved client-IP source, rendered on demand instead of through an
+/// intermediate `String`. [`std::fmt::Display`] writes it straight into the
+/// caller's buffer (the tracing span's field storage), so the per-request span
+/// factory no longer materializes an owned `String` on every request
+/// (benches/ROUND13.md §H2). Bytes rendered are identical to
 /// [`client_ip`]/[`client_ip_from_parts`] for all four cases.
-pub enum ClientIpDisplay<'a> {
-    /// Proxy-forwarded client address (borrowed from `X-Forwarded-For` /
-    /// `X-Real-Ip`), already trimmed.
-    Forwarded(&'a str),
+pub enum ClientIpDisplay {
+    /// Proxy-forwarded client address, canonicalised (an `IpAddr`, so the value
+    /// is `Copy` and nothing is borrowed from the request).
+    ForwardedIp(IpAddr),
     /// Direct TCP peer, rendered with the port.
     PeerWithPort(SocketAddr),
     /// Direct TCP peer, rendered as the bare IP.
@@ -164,10 +229,10 @@ pub enum ClientIpDisplay<'a> {
     Unknown,
 }
 
-impl std::fmt::Display for ClientIpDisplay<'_> {
+impl std::fmt::Display for ClientIpDisplay {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClientIpDisplay::Forwarded(s) => f.write_str(s),
+            ClientIpDisplay::ForwardedIp(ip) => write!(f, "{ip}"),
             ClientIpDisplay::PeerWithPort(addr) => write!(f, "{addr}"),
             ClientIpDisplay::PeerIp(ip) => write!(f, "{ip}"),
             ClientIpDisplay::Unknown => f.write_str("unknown"),
@@ -175,46 +240,32 @@ impl std::fmt::Display for ClientIpDisplay<'_> {
     }
 }
 
-/// Zero-allocation twin of [`client_ip_from_parts`]: resolves the client-IP
-/// source without producing an owned `String`. The returned value borrows
-/// `headers`, so it must be `Display`-rendered before `headers` is dropped
-/// (the span factory does this synchronously).
-pub fn client_ip_display_from_parts<'a>(
-    headers: &'a axum::http::HeaderMap,
+/// Allocation-free twin of [`client_ip_from_parts`]: resolves the client-IP
+/// source without producing an owned `String`. The returned value owns
+/// everything it renders (an `IpAddr`/`SocketAddr`, both `Copy`), and returns
+/// exactly the bytes [`client_ip_from_parts`] would.
+pub fn client_ip_display_from_parts(
+    headers: &axum::http::HeaderMap,
     peer: Option<SocketAddr>,
     include_port: bool,
-) -> ClientIpDisplay<'a> {
-    if let Some(peer_addr) = peer {
-        if is_trusted_proxy(peer_addr.ip()) {
-            if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
-                && let Some(ip) = xff
-                    .split(',')
-                    .next()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-            {
-                return ClientIpDisplay::Forwarded(ip);
-            }
-            if let Some(xri) = headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return ClientIpDisplay::Forwarded(xri);
-            }
-        }
-        return if include_port {
-            ClientIpDisplay::PeerWithPort(peer_addr)
-        } else {
-            ClientIpDisplay::PeerIp(peer_addr.ip())
-        };
+) -> ClientIpDisplay {
+    let Some(peer_addr) = peer else {
+        return ClientIpDisplay::Unknown;
+    };
+    if is_trusted_proxy(peer_addr.ip())
+        && let Some(ip) = forwarded_client_ip(headers)
+    {
+        return ClientIpDisplay::ForwardedIp(ip);
     }
-    ClientIpDisplay::Unknown
+    if include_port {
+        ClientIpDisplay::PeerWithPort(peer_addr)
+    } else {
+        ClientIpDisplay::PeerIp(peer_addr.ip())
+    }
 }
 
 /// Zero-allocation twin of [`client_ip`] for the request-span factory.
-pub fn client_ip_display<B>(req: &Request<B>, include_port: bool) -> ClientIpDisplay<'_> {
+pub fn client_ip_display<B>(req: &Request<B>, include_port: bool) -> ClientIpDisplay {
     let peer: Option<SocketAddr> = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -224,45 +275,26 @@ pub fn client_ip_display<B>(req: &Request<B>, include_port: bool) -> ClientIpDis
 
 /// Same as [`client_ip`], but operates on already-extracted parts (headers
 /// plus an optional TCP peer).  Handlers that don't take a full `Request<B>`,
-/// e.g. those that consume the body via `Json<…>`, can still derive a stable
+/// e.g. those that consume the body via `Json<...>`, can still derive a stable
 /// client identifier with this entry point.
 pub fn client_ip_from_parts(
     headers: &axum::http::HeaderMap,
     peer: Option<SocketAddr>,
     include_port: bool,
 ) -> String {
-    if let Some(peer_addr) = peer {
-        if is_trusted_proxy(peer_addr.ip()) {
-            // Try X-Forwarded-For first (leftmost = original client)
-            if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
-                && let Some(ip) = xff
-                    .split(',')
-                    .next()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-            {
-                return ip.to_string();
-            }
-
-            // Then X-Real-Ip
-            if let Some(xri) = headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return xri.to_string();
-            }
-        }
-
-        return if include_port {
-            peer_addr.to_string()
-        } else {
-            peer_addr.ip().to_string()
-        };
+    let Some(peer_addr) = peer else {
+        return "unknown".to_string();
+    };
+    if is_trusted_proxy(peer_addr.ip())
+        && let Some(ip) = forwarded_client_ip(headers)
+    {
+        return ip.to_string();
     }
-
-    "unknown".to_string()
+    if include_port {
+        peer_addr.to_string()
+    } else {
+        peer_addr.ip().to_string()
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
