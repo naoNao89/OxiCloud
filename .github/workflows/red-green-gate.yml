@@ -1,0 +1,435 @@
+# =============================================================================
+# RED/GREEN proof gate — test-first history, checked by execution
+#
+# What this proves, and why a green `ci.yml` does not:
+#   `ci.yml` runs the suite on the branch TIP. A suite that has always been green
+#   (or a test that never ran) looks exactly the same as a test that went from red
+#   to green. This gate checks the *transition* instead: it checks out the
+#   recorded test-only commit, requires the named test to FAIL there for the
+#   expected reason, checks out the fix commit, requires the SAME test (byte-
+#   identical file: `git diff --quiet` below) to PASS, and refuses any RED whose
+#   failure is a compile error, a missing dependency, a timeout or an unrelated
+#   test failure. A job here passes only when both states were observed.
+#
+# The SHAs and expectations live in docs/re/red-green/manifest.json so this file
+# stays identical on every branch (the branches carry the same workflow bytes;
+# only the manifest differs, and the manifest is per-branch too — see README in
+# that directory).
+#
+# Inputs it does NOT take: a commit to test that is not in the branch's history.
+# `fetch-depth: 0` is deliberate.
+# =============================================================================
+name: RED/GREEN proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "fix/limiter-window"
+      - "feat/setup-budget"
+      - "fix/trusted-proxy-xff"
+      - "docs/setup-openapi"
+      - "fix/spa-error-shapes"
+    paths:
+      - "docs/re/red-green/**"
+      - "src/**"
+      - "frontend/**"
+      - ".github/workflows/red-green-gate.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: red-green-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  red-green:
+    name: RED then GREEN — ${{ matrix.branch }}
+    runs-on: ubuntu-latest
+    services:
+      # Only the live-HTTP leg uses it, but `services:` is provisioned per job and
+      # cannot be made conditional (the same trade-off the RE gate documents). The
+      # port is runner-assigned: a fixed mapping collided twice in ~40 jobs there.
+      postgres:
+        image: postgres:18.2-alpine3.23
+        env:
+          POSTGRES_USER: re_user
+          POSTGRES_PASSWORD: re_pass
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - "5432"
+        options: >-
+          --health-cmd "pg_isready -U re_user"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - branch: fix/limiter-window
+            kind: rust
+          - branch: feat/setup-budget
+            kind: integration
+          - branch: fix/trusted-proxy-xff
+            kind: rust
+          - branch: docs/setup-openapi
+            kind: rust
+          - branch: fix/spa-error-shapes
+            kind: frontend
+    steps:
+      # Only the leg whose branch is the pushed ref does anything; the others are
+      # here so the matrix names stay stable across branches. Same pattern as the
+      # RE gate: a skipped leg is not evidence, and the required-check job below
+      # says so explicitly.
+      - if: matrix.branch != github.ref_name
+        run: echo "not this ref (${{ github.ref_name }}); this leg asserts nothing"
+
+      - if: matrix.branch == github.ref_name
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read the manifest for this branch
+        if: matrix.branch == github.ref_name
+        id: m
+        run: |
+          set -euo pipefail
+          python3 - "${{ matrix.branch }}" <<'PY' >> "$GITHUB_OUTPUT"
+          import json, sys
+          want = sys.argv[1]
+          m = json.load(open("docs/re/red-green/manifest.json"))
+          for e in m["branches"]:
+              if e["branch"] == want:
+                  for k in ("red", "green", "test_path", "test_target", "filter", "expect_red", "expect_green", "kind"):
+                      v = e.get(k, "")   # test_target is only meaningful for kind=integration
+                      if "\n" in v:
+                          print("%s<<EOF" % k); print(v); print("EOF")
+                      else:
+                          print("%s=%s" % (k, v))
+                  break
+          else:
+              raise SystemExit("no manifest entry for %s" % want)
+          PY
+          cat "$GITHUB_OUTPUT"
+          # Every manifest value is later interpolated into a run block as a GitHub
+          # expression. A double quote there ends that shell string early; a backtick or
+          # command substitution executes; a backslash escapes. Refuse such a value loudly
+          # rather than failing in a confusing way three steps later — pick a quote-free
+          # substring of the assertion text.
+          if grep -qE '["`$\\]' "$GITHUB_OUTPUT"; then
+            echo "::error::a manifest value contains a double quote, backtick, dollar sign or backslash — pick a quote-free substring of the assertion text"
+            grep -nE '["`$\\]' "$GITHUB_OUTPUT" || true
+            exit 1
+          fi
+          echo "manifest values are shell-safe"
+
+      - name: Hand the live-HTTP leg a database
+        if: matrix.branch == github.ref_name
+        run: |
+          # Without a URL the integration test prints SKIP and PASSES, which would be a
+          # silent false green. The live legs also assert the absence of SKIP (below), but
+          # the URL is what makes the leg mean anything at all.
+          echo "OXICLOUD_TEST_DB_URL=postgres://re_user:re_pass@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres" >> "$GITHUB_ENV"
+          echo "database for this leg: 127.0.0.1:${{ job.services.postgres.ports['5432'] }}"
+
+      - name: The manifest's kind must be the kind this leg implements
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          # Every leg below gates on matrix.kind, so a divergence runs the WRONG commands for a
+          # branch. Not hypothetical: the manifest said `integration` for feat/setup-budget while
+          # the matrix said `rust`, which left the integration legs unreachable and would have made
+          # its region check error on a file containing no test-gated attribute. An independent
+          # auditor found it; this turns the drift into a loud failure.
+          [ "${{ matrix.kind }}" = "${{ steps.m.outputs.kind }}" ] \
+            || { echo "::error::matrix.kind=${{ matrix.kind }} but the manifest says kind=${{ steps.m.outputs.kind }} — the wrong leg would run"; exit 1; }
+          echo "OK — matrix.kind and the manifest agree: ${{ matrix.kind }}"
+
+      - name: The manifest must name commits that exist in this history
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          for c in "${{ steps.m.outputs.red }}" "${{ steps.m.outputs.green }}"; do
+            git cat-file -e "${c}^{commit}" || { echo "::error::$c is not a commit in this branch's history"; exit 1; }
+          done
+          # The test commit must PREDATE the fix. A rebase that inverted them would
+          # otherwise still "prove" something.
+          if ! git merge-base --is-ancestor "${{ steps.m.outputs.red }}" "${{ steps.m.outputs.green }}"; then
+            echo "::error::the test-only commit is not an ancestor of the fix commit"; exit 1
+          fi
+          # And the fix must be in the pushed history, not a local branch's idea of it.
+          git merge-base --is-ancestor "${{ steps.m.outputs.green }}" HEAD \
+            || { echo "::error::the fix commit is not an ancestor of HEAD (${{ github.sha }})"; exit 1; }
+
+      - name: The RED test must not have been touched by the fix, nor by the delivered HEAD
+        if: matrix.branch == github.ref_name
+        run: |
+          set -euo pipefail
+          red="${{ steps.m.outputs.red }}"; kind="${{ matrix.kind }}"; head="${{ github.sha }}"
+          # The mission's step 8 is about the DELIVERED state, not only the historical fix
+          # commit: a later commit could re-touch the test or the code and the gate would
+          # not notice. So the frozen test is compared against BOTH — the fix commit (the
+          # causal transition) and the pushed HEAD (what is actually being delivered).
+          for path in ${{ steps.m.outputs.test_path }}; do
+            for target in "${{ steps.m.outputs.green }}" "$head"; do
+              if [ "$kind" = "integration" ]; then
+                # A separate test file, repo-relative: whole-file identity, no prefix.
+                gp="$path"
+                git cat-file -e "$red:$gp" 2>/dev/null \
+                  || { echo "::error::$gp is not a file at $red"; exit 1; }
+                git diff --quiet "$red" "$target" -- "$gp" \
+                  || { echo "::error::$gp differs between the test-only commit and $target"; git diff --stat "$red" "$target" -- "$gp"; exit 1; }
+                echo "OK — $gp byte-identical at $red and $target (sha256 $(git show "$target:$gp" | sha256sum | cut -c1-16)…)"
+              elif [ "$kind" = "frontend" ]; then
+                gp="frontend/$path"
+                git cat-file -e "$red:$gp" 2>/dev/null \
+                  || { echo "::error::$gp is not a file at $red — check the manifest path (it must be frontend-relative)"; exit 1; }
+                git diff --quiet "$red" "$target" -- "$gp" \
+                  || { echo "::error::$gp differs between the test-only commit and $target"; git diff --stat "$red" "$target" -- "$gp"; exit 1; }
+                echo "OK — $gp byte-identical at $red and $target (sha256 $(git show "$target:$gp" | sha256sum | cut -c1-16)…)"
+              else
+                # The region must start at the FIRST test-gated attribute of ANY spelling —
+                # `#[cfg(test)]`, `#[cfg(all(test, unix))]`, … An auditor bypassed the exact-
+                # spelling version by weakening an assertion in a test module declared above
+                # the `#[cfg(test)]` line: the region stayed byte-identical while the test was
+                # gutted.
+                for c in "$red" "$target"; do
+                  # A literal regex in the awk program: `-v m='…\[cfg…'` loses the backslashes
+                  # (awk processes escapes in -v values), turning the marker into a character
+                  # class that matches nothing — caught by re-running the extraction here.
+                  # The pattern admits `#[cfg(test)]`, `#[cfg(all(test, …))]`, `#[cfg(any(test, …))]`
+                  # and `#![cfg(test)]`, and REJECTS `#[cfg(not(test))]` and
+                  # `#[cfg(feature = "test-…")]`: an auditor showed those made the region start
+                  # above production code, turning a legitimate pair into a false refusal.
+                  git show "$c:$path" | awk '/^#!?\[cfg\((all\(|any\()?test[^a-z]/ {f=1} f' > "/tmp/region.$c"
+                  [ -s "/tmp/region.$c" ] \
+                    || { echo "::error::no test-gated region found in $path at $c"; exit 1; }
+                  # The filter must be a DECLARATION inside the region — `fn <name>` or the module
+                  # that contains it (`mod <name>…`) — not a substring a comment can satisfy: naming
+                  # a decoy file whose module merely *mentions* the test in a comment left the real
+                  # test unfrozen. One branch's filter names a module rather than a function, so both
+                  # forms are accepted. (Advisory, not a proof — see "What this gate does NOT prove".)
+                  grep -qE "(fn|mod) +${{ steps.m.outputs.filter }}" "/tmp/region.$c" \
+                    || { echo "::error::the manifest's filter ('${{ steps.m.outputs.filter }}') is neither a fn nor a mod declaration inside $path's test region at $c"; exit 1; }
+                done
+                if ! cmp -s "/tmp/region.$red" "/tmp/region.$target"; then
+                  echo "::error::the test region of $path differs between the test-only commit and $target"
+                  diff -u "/tmp/region.$red" "/tmp/region.$target" | head -40 || true
+                  exit 1
+                fi
+                echo "OK — the whole #[cfg(test)] region of $path is byte-identical at $red and $target ($(wc -l < "/tmp/region.$red" | tr -d ' ') lines, sha256 $(sha256sum < "/tmp/region.$red" | cut -c1-16)…)"
+              fi
+            done
+          done
+
+      - name: Toolchain (Rust legs)
+        if: matrix.branch == github.ref_name && matrix.kind == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Node (frontend leg)
+        if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26.3.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ── RED: the test-only commit must fail, for the expected reason ───────
+      - name: RED leg — the test must fail on the unpatched tree
+        if: matrix.branch == github.ref_name && matrix.kind == 'rust'
+        run: |
+          set -uo pipefail
+          git checkout --detach "${{ steps.m.outputs.red }}"
+          set +e
+          cargo test --lib -- "${{ steps.m.outputs.filter }}" > /tmp/red.log 2>&1
+          rc=$?
+          set -e
+          tail -40 /tmp/red.log
+          echo "RED exit code: $rc"
+          [ "$rc" -ne 0 ] || { echo "::error::the test PASSED on the unpatched tree — it is not a regression test for this defect"; exit 1; }
+          # The failure must be the assertion, not the build. Each of these is an
+          # invalid RED and is rejected explicitly rather than counted.
+          if grep -qE 'error\[E[0-9]+\]|error: could not compile|cannot find (function|value|crate|type)|unresolved import|failed to select a version|error: linking' /tmp/red.log; then
+            echo "::error::the RED failure is a build/compile error, not the assertion — that is not evidence of the defect"; exit 1
+          fi
+          grep -qE '^test result: FAILED|^failures:' /tmp/red.log \
+            || { echo "::error::no test-failure marker in the log; the run may have been filtered to nothing"; exit 1; }
+          grep -qF "${{ steps.m.outputs.expect_red }}" /tmp/red.log \
+            || { echo "::error::the failure does not carry the expected assertion text"; echo "expected: ${{ steps.m.outputs.expect_red }}"; exit 1; }
+          grep -qE "running [0-9]+ tests?" /tmp/red.log \
+            || { echo "::error::the test binary did not report running any test — a filtered-to-nothing run cannot be RED"; exit 1; }
+          echo "OK — RED: the named assertion failed on the unpatched tree, and it was the assertion that failed"
+
+      - name: RED leg — the test must fail on the unpatched tree (frontend)
+        if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
+        working-directory: frontend
+        run: |
+          set -uo pipefail
+          git checkout --detach "${{ steps.m.outputs.red }}"
+          npm ci --silent
+          set +e
+          # Normalise into the stored log BEFORE any assertion reads it: the runner gives
+          # each step a pty, so vitest keeps its colour, and the summary line arrives as
+          # `\x1b[31mTests\x1b[39m \x1b[1m\x1b[31m4 failed\x1b[39m` — a raw grep for
+          # `Tests +[0-9]+ failed` then matches nothing. (This is the same defect the RE
+          # gate's frontend leg had; there it was caught by a real CI run, not by review.)
+          npx vitest run --reporter=verbose "${{ steps.m.outputs.test_path }}" 2>&1 \
+            | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' > /tmp/red.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          tail -40 /tmp/red.log
+          echo "RED exit code: $rc"
+          [ "$rc" -ne 0 ] || { echo "::error::the test PASSED on the unpatched tree"; exit 1; }
+          if grep -qE 'Cannot find module|Transform failed|SyntaxError|type error TS[0-9]+' /tmp/red.log; then
+            echo "::error::the RED failure is a build/compile error, not the assertion"; exit 1
+          fi
+          grep -qF "${{ steps.m.outputs.expect_red }}" /tmp/red.log \
+            || { echo "::error::the failure does not carry the expected assertion text"; exit 1; }
+          grep -qE 'Tests +[0-9]+ failed' /tmp/red.log \
+            || { echo "::error::no failing-test summary in the log"; exit 1; }
+          echo "OK — RED: the named assertion failed on the unpatched tree"
+
+      # ── GREEN: the same test, same file, on the fix ────────────────────────
+      - name: GREEN leg — the same test must pass on the fix
+        if: matrix.branch == github.ref_name && matrix.kind == 'rust'
+        run: |
+          set -euo pipefail
+          git checkout --detach "${{ steps.m.outputs.green }}"
+          cargo test --lib -- "${{ steps.m.outputs.filter }}" 2>&1 | tee /tmp/green.log
+          grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/green.log \
+            || { echo "::error::GREEN did not report a passing test result"; exit 1; }
+          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/green.log \
+            || { echo "::error::the expected passing line is absent"; exit 1; }
+          echo "OK — GREEN: the same test passes on the fix, with the file unchanged since RED"
+
+      - name: GREEN leg — the same test must pass on the fix (frontend)
+        if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          git checkout --detach "${{ steps.m.outputs.green }}"
+          npx vitest run --reporter=verbose "${{ steps.m.outputs.test_path }}" 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee /tmp/green.log
+          grep -qE 'Test Files +[0-9]+ passed' /tmp/green.log || { echo "::error::GREEN did not report a passing file"; exit 1; }
+          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/green.log \
+            || { echo "::error::the expected passing line is absent"; exit 1; }
+          echo "OK — GREEN: the same test passes on the fix, with the file unchanged since RED"
+
+      - name: HEAD leg — the same test must pass on the delivered HEAD (rust)
+        if: matrix.branch == github.ref_name && matrix.kind == 'rust'
+        run: |
+          set -euo pipefail
+          # Step 8 of the contract is about what is being DELIVERED. The fix commit proved
+          # the transition; this proves the pushed HEAD still carries that behaviour, so a
+          # later commit cannot quietly move either the test or the code out from under it
+          # (the frozen-test comparison above already covers the test's text at HEAD).
+          git checkout --detach "${{ github.sha }}"
+          cargo test --lib -- "${{ steps.m.outputs.filter }}" 2>&1 | tee /tmp/head.log
+          grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/head.log \
+            || { echo "::error::the delivered HEAD does not report a passing test result"; exit 1; }
+          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/head.log \
+            || { echo "::error::the expected passing line is absent at HEAD"; exit 1; }
+          echo "OK — GREEN also holds on the delivered HEAD (${{ github.sha }}), not only on the historical fix commit"
+
+      - name: HEAD leg — the same test must pass on the delivered HEAD (frontend)
+        if: matrix.branch == github.ref_name && matrix.kind == 'frontend'
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          git checkout --detach "${{ github.sha }}"
+          npx vitest run --reporter=verbose "${{ steps.m.outputs.test_path }}" 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee /tmp/head.log
+          grep -qE 'Test Files +[0-9]+ passed' /tmp/head.log \
+            || { echo "::error::the delivered HEAD did not report a passing file"; exit 1; }
+          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/head.log \
+            || { echo "::error::the expected passing line is absent at HEAD"; exit 1; }
+          echo "OK — GREEN also holds on the delivered HEAD (${{ github.sha }})"
+
+      - name: RED leg — the live-HTTP regression must fail on the unpatched tree
+        if: matrix.branch == github.ref_name && matrix.kind == 'integration'
+        run: |
+          set -uo pipefail
+          # Fail closed: without a database URL the test prints SKIP and passes, and
+          # libtest CAPTURES a passing test's stdout — so without --nocapture the SKIP
+          # line would never reach the log and a skip would read as `ok. 1 passed`.
+          # Both belts are worn: require the URL, and require the marker to be visible.
+          [ -n "${OXICLOUD_TEST_DB_URL:-}" ] \
+            || { echo "::error::OXICLOUD_TEST_DB_URL is unset — the integration test would SKIP and pass; failing closed"; exit 1; }
+          git checkout --detach "${{ steps.m.outputs.red }}"
+          cargo build --bin oxicloud            # the test spawns the real binary, so it must exist
+          set +e
+          cargo test --test "${{ steps.m.outputs.test_target }}" -- "${{ steps.m.outputs.filter }}" --nocapture > /tmp/red.log 2>&1
+          rc=$?
+          set -e
+          tail -60 /tmp/red.log
+          if grep -qE '^SKIP' /tmp/red.log; then
+            echo "::error::the test SKIPPED (no database?) — a skipped test proves nothing and would pass GREEN vacuously"; exit 1
+          fi
+          [ "$rc" -ne 0 ] || { echo "::error::the test PASSED on the unpatched tree — it is not a regression test for this defect"; exit 1; }
+          if grep -qE 'error\[E[0-9]+\]|error: could not compile|cannot find|unresolved import' /tmp/red.log; then
+            echo "::error::the RED failure is a build error, not the assertion"; exit 1
+          fi
+          grep -qE '^test result: FAILED' /tmp/red.log \
+            || { echo "::error::no test-failure marker in the log"; exit 1; }
+          grep -qF "${{ steps.m.outputs.expect_red }}" /tmp/red.log \
+            || { echo "::error::the failure does not carry the expected assertion text"; exit 1; }
+          echo "OK — RED: the live-HTTP regression failed on the unpatched tree, and it was the assertion that failed"
+
+      - name: GREEN leg — the same live regression must pass on the fix
+        if: matrix.branch == github.ref_name && matrix.kind == 'integration'
+        run: |
+          set -euo pipefail
+          [ -n "${OXICLOUD_TEST_DB_URL:-}" ] \
+            || { echo "::error::OXICLOUD_TEST_DB_URL is unset — the integration test would SKIP and pass; failing closed"; exit 1; }
+          git checkout --detach "${{ steps.m.outputs.green }}"
+          cargo build --bin oxicloud
+          cargo test --test "${{ steps.m.outputs.test_target }}" -- "${{ steps.m.outputs.filter }}" --nocapture 2>&1 | tee /tmp/green.log
+          if grep -qE '^SKIP' /tmp/green.log; then echo "::error::the test SKIPPED — a skip is not a pass"; exit 1; fi
+          grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/green.log \
+            || { echo "::error::GREEN did not report a passing test result"; exit 1; }
+          # expect_green is a BEHAVIOURAL marker (the post-fix startup line), not the test
+          # name: a skip reports the same summary line, so the name would not discriminate.
+          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/green.log \
+            || { echo "::error::the expected behavioural marker is absent — the run did not exercise the fixed wiring"; exit 1; }
+          echo "OK — GREEN: the same live-HTTP regression passes on the fix, with the test file unchanged since RED"
+
+      - name: HEAD leg — the same live regression must pass on the delivered HEAD
+        if: matrix.branch == github.ref_name && matrix.kind == 'integration'
+        run: |
+          set -euo pipefail
+          [ -n "${OXICLOUD_TEST_DB_URL:-}" ] \
+            || { echo "::error::OXICLOUD_TEST_DB_URL is unset — the integration test would SKIP and pass; failing closed"; exit 1; }
+          git checkout --detach "${{ github.sha }}"
+          cargo build --bin oxicloud
+          cargo test --test "${{ steps.m.outputs.test_target }}" -- "${{ steps.m.outputs.filter }}" --nocapture 2>&1 | tee /tmp/head.log
+          if grep -qE '^SKIP' /tmp/head.log; then echo "::error::the test SKIPPED at HEAD — a skip is not a pass"; exit 1; fi
+          grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/head.log \
+            || { echo "::error::the delivered HEAD does not report a passing test result"; exit 1; }
+          grep -qF "${{ steps.m.outputs.expect_green }}" /tmp/head.log \
+            || { echo "::error::the expected behavioural marker is absent at HEAD"; exit 1; }
+          echo "OK — GREEN also holds on the delivered HEAD (${{ github.sha }})"
+
+      - name: Summarise for the branch
+        if: matrix.branch == github.ref_name
+        run: |
+          {
+            echo "RED   ${{ steps.m.outputs.red }}   (the assertion failed there)"
+            echo "GREEN ${{ steps.m.outputs.green }}   (the same test, same file, passes)"
+            echo "test  ${{ steps.m.outputs.test_path }}"
+            echo "filter ${{ steps.m.outputs.filter }}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  required:
+    name: RED/GREEN proof (required)
+    needs: [red-green]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: The legs that ran must not have failed, and the pushed ref's leg must have run
+        run: |
+          set -euo pipefail
+          echo "legs=${{ needs.red-green.result }}"
+          [ "${{ needs.red-green.result }}" = "success" ] \
+            || { echo "::error::a RED/GREEN leg reported ${{ needs.red-green.result }}"; exit 1; }
+          echo "OK — the pushed ref's leg proved both states"
