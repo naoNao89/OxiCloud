@@ -11,7 +11,8 @@
 //!   [H2] Per-request `client_ip` `String` in the span factory —
 //!        `ClientIpMakeSpan::make_span` allocated an owned `String` on every
 //!        request purely to feed the span's `%client_ip` Display, vs a
-//!        borrow-only `ClientIpDisplay` that renders into the span storage.
+//!        `ClientIpDisplay` enum that renders on demand into the span
+//!        storage without materializing an owned `String`.
 //!
 //! Run:
 //!   cargo run --release --features bench --example bench_round13_micro
@@ -189,12 +190,15 @@ fn section_client_ip() {
         (&empty_headers, None),
     ] {
         let owned = client_ip_from_parts(headers, peer, true);
-        let borrowed = format!("{}", client_ip_display_from_parts(headers, peer, true));
-        assert_eq!(owned, borrowed, "client_ip bytes differ");
+        let displayed = format!("{}", client_ip_display_from_parts(headers, peer, true));
+        assert_eq!(owned, displayed, "client_ip bytes differ");
     }
     // Directly exercise every ClientIpDisplay variant's Display.
     assert_eq!(
-        format!("{}", ClientIpDisplay::Forwarded("1.2.3.4")),
+        format!(
+            "{}",
+            ClientIpDisplay::ForwardedIp("1.2.3.4".parse().unwrap())
+        ),
         "1.2.3.4"
     );
     assert_eq!(
@@ -209,7 +213,7 @@ fn section_client_ip() {
         "5.6.7.8"
     );
     assert_eq!(format!("{}", ClientIpDisplay::Unknown), "unknown");
-    println!("# [H2] gate: borrow-only Display renders byte-identical to owned String — OK");
+    println!("# [H2] gate: display enum renders byte-identical to owned String — OK");
 
     // The span records `client_ip = %ip`; emulate that terminal render into a
     // reusable String (the span's field storage) for BOTH arms so we isolate
@@ -233,7 +237,7 @@ fn section_client_ip() {
     println!("\n## [H2] client_ip resolution for the span factory (direct peer)");
     println!("| arm | ns/op | allocs/op |");
     print_row("BEFORE owned String + render", &m_before);
-    print_row("AFTER  borrow Display + render", &m_after);
+    print_row("AFTER  display enum + render", &m_after);
     println!(
         "# {:.2}x wall, {:.1} fewer allocs/request",
         m_before.wall_ns_per_op / m_after.wall_ns_per_op,
