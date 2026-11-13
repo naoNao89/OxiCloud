@@ -1,0 +1,26 @@
+{
+  "_comment": "Consumed by .github/workflows/red-green-gate.yml. This copy covers ONE branch — fix/security-quinn-udp, the dependency-advisory branch cut from C0 — and ships the gate extended for it (this entry, plus tests/** and Cargo.lock in the trigger paths). The five delivery branches carry their own five-entry copy of the gate and manifest; this branch does not modify theirs. Values must be shell-safe: no double quotes, backticks, dollar signs or backslashes. The gate reads exactly: branch, kind, red, green, test_path, test_target, filter, expect_red, expect_green.",
+  "branches": [
+    {
+      "branch": "fix/security-quinn-udp",
+      "kind": "integration",
+      "red": "dc8fa2888f1f96687fd9872fe940721cd7b7d488",
+      "green": "a438c8fe066d80a2a558eb90c94191d01bba5b8d",
+      "test_path": "tests/quinn_udp_advisory_policy.rs",
+      "test_target": "quinn_udp_advisory_policy",
+      "filter": "quinn_udp_is_outside_the_affected_advisory_range",
+      "expect_red": "is inside the range affected by RUSTSEC-2026-0538",
+      "expect_green": "policy: quinn-udp clears RUSTSEC-2026-0538",
+      "_evidence": {
+        "base": "C0 389e161b",
+        "policy_test": "a lockfile pin, not an exploit: it asserts no resolved generation of quinn-udp or quinn-proto is inside an affected advisory range, and says nothing about reachability",
+        "multi_version": "the pin iterates EVERY resolved generation, and a synthetic-lock test in the same file proves a second affected generation cannot hide behind a fixed first one",
+        "bump": "cargo update -p quinn-udp --precise 0.5.16 (cargo 1.99.0), inside quinn 0.11.9's own quinn-udp = 0.5 constraint; cargo also dropped a duplicate windows-sys 0.60.2 generation, left as generated rather than hand-trimmed",
+        "advisories": "RUSTSEC-2026-0538 (quinn-udp; fixed 0.5.16 / 0.6.3) drives the transition; RUSTSEC-2026-0524 (quinn-proto; fixed 0.11.19) is already satisfied at C0 and is pinned so it cannot regress",
+        "red_run": "the pin fails on the RED commit with quinn-udp 0.5.14 is inside the range affected by RUSTSEC-2026-0538 / GHSA-6pp4-4cxf-xf88 (fixed in 0.5.16); 2 passed, 1 failed",
+        "green_run": "3 passed, 0 failed, and the marker policy: quinn-udp clears RUSTSEC-2026-0538 is printed under --nocapture",
+        "fmt": "cargo fmt --all -- --check is clean on the branch"
+      }
+    }
+  ]
+}
