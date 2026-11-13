@@ -35,6 +35,7 @@ on:
       - "docs/re/red-green/**"
       - "src/**"
       - "tests/**"
+      - "examples/**"
       - "Cargo.lock"
       - "frontend/**"
       - ".github/workflows/red-green-gate.yml"
